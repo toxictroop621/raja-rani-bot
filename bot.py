@@ -21,23 +21,16 @@ game_history = {}
 # ===== HELPER FUNCTIONS =====
 
 def is_admin_or_creator(message, game):
-    """Check if user is group admin OR game creator"""
-    # Check if bot owner
     if message.from_user.id == BOT_OWNER_ID:
         return True
-    
-    # Check if game creator
     if game and game.creator_id == message.from_user.id:
         return True
-    
-    # Check if group admin
     try:
         chat_member = bot.get_chat_member(message.chat.id, message.from_user.id)
         if chat_member.status in ['administrator', 'creator']:
             return True
     except:
         pass
-    
     return False
 
 def is_bot_owner(message):
@@ -74,7 +67,6 @@ def load_game_data():
         return {"games": {}, "history": {}}
 
 def check_dm_access(player_id):
-    """Check if bot can DM the player"""
     try:
         bot.send_chat_action(player_id, 'typing')
         return True
@@ -82,7 +74,6 @@ def check_dm_access(player_id):
         return False
 
 def delete_message(chat_id, message_id):
-    """Safely delete a message"""
     try:
         bot.delete_message(chat_id, message_id)
     except:
@@ -91,7 +82,6 @@ def delete_message(chat_id, message_id):
 # ===== INLINE KEYBOARD FUNCTIONS =====
 
 def get_player_buttons(game, seeker_id, chat_id):
-    """Generate inline keyboard with player names for group"""
     markup = InlineKeyboardMarkup(row_width=2)
     buttons = []
     for p in game.players:
@@ -100,13 +90,11 @@ def get_player_buttons(game, seeker_id, chat_id):
                 p["name"], 
                 callback_data=f"guess_{chat_id}_{p['id']}_{seeker_id}"
             ))
-    # Add cancel button
     buttons.append(InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_{chat_id}"))
     markup.add(*buttons)
     return markup
 
 def get_mode_buttons():
-    """Generate inline keyboard for mode selection"""
     markup = InlineKeyboardMarkup(row_width=2)
     buttons = [
         InlineKeyboardButton("👑 4 Players", callback_data="mode_4"),
@@ -126,7 +114,7 @@ class Game:
         self.players = []
         self.roles = MODES[mode]["roles"].copy()
         self.points = MODES[mode]["points"].copy()
-        self.targets = MODES[mode]["targets"].copy()
+        self.targets = MODES[mode]["targets"].copy()  # These are plain text: "Queen", "Minister", etc.
         self.current_level = 0
         self.status = "waiting"
         self.card_map = {}
@@ -134,7 +122,7 @@ class Game:
         self.start_time = None
         self.total_rounds = 0
         self.bets = {}
-        self.start_message_id = None  # Store the start message to delete later
+        self.start_message_id = None
         
     def add_player(self, player_id, player_name):
         if len(self.players) >= self.mode:
@@ -178,27 +166,38 @@ class Game:
         self.bets = {}
         
         seeker = self.get_current_seeker()
-        target = self.targets[self.current_level]
+        target = self.get_target_role()  # This returns plain text like "Queen"
         
         return True, {
             "message": f"🎮 Game started! {len(self.players)} players, {self.mode}-Player Mode",
             "seeker": seeker,
             "target": target,
-            "points": self.points[self.current_level]
+            "points": self.get_points()
         }
     
     def get_current_seeker(self):
-        role = self.roles[self.current_level]
+        role = self.roles[self.current_level]  # This is full role with emoji: "👑 King"
         for player in self.players:
             if self.card_map.get(player["id"]) == role:
                 return player
         return None
     
     def get_target_role(self):
-        return self.targets[self.current_level]
+        # Returns plain text target name (no emoji): "Queen", "Minister", etc.
+        if self.current_level < len(self.targets):
+            return self.targets[self.current_level]
+        return None
+    
+    def get_target_role_with_emoji(self):
+        # Returns full role with emoji: "👸 Queen"
+        if self.current_level < len(self.roles):
+            return self.roles[self.current_level + 1] if self.current_level + 1 < len(self.roles) else None
+        return None
     
     def get_points(self):
-        return self.points[self.current_level]
+        if self.current_level < len(self.points):
+            return self.points[self.current_level]
+        return 0
     
     def make_guess(self, seeker_id, chosen_player_id):
         if self.status != "playing":
@@ -208,17 +207,29 @@ class Game:
         if not seeker or seeker["id"] != seeker_id:
             return False, "❌ It's not your turn!"
         
-        target_role = self.targets[self.current_level]
-        chosen_role = self.card_map.get(chosen_player_id, "Unknown")
-        chosen_player = self.get_player(chosen_player_id)
+        # Get target role (plain text like "Queen")
+        target_role = self.get_target_role()
+        if not target_role:
+            return False, "❌ No target found!"
         
+        # Get chosen player's role (full with emoji like "👸 Queen")
+        chosen_role_full = self.card_map.get(chosen_player_id, "Unknown")
+        
+        # Extract plain role name (remove emoji and spaces)
+        # "👸 Queen" -> "Queen"
+        # "👑 King" -> "King"
+        import re
+        chosen_role_plain = re.sub(r'[^\w\s]', '', chosen_role_full).strip()
+        
+        chosen_player = self.get_player(chosen_player_id)
         if not chosen_player:
             return False, "❌ Player not found!"
         
         bet_amount = self.bets.get(seeker_id, 0)
         
-        if chosen_role == target_role:
-            points = self.points[self.current_level]
+        # Compare plain text roles
+        if chosen_role_plain == target_role:
+            points = self.get_points()
             seeker["points"] += points
             
             if bet_amount > 0:
@@ -244,8 +255,8 @@ class Game:
                     "message": f"✅ {seeker['name']} found {target_role}! +{points} points! 🎉 {bet_msg}",
                     "points": points,
                     "next_seeker": next_seeker["name"] if next_seeker else "Unknown",
-                    "next_target": self.targets[self.current_level],
-                    "next_points": self.points[self.current_level]
+                    "next_target": self.get_target_role(),
+                    "next_points": self.get_points()
                 }
         else:
             old_seeker_role = self.card_map[seeker_id]
@@ -270,7 +281,7 @@ class Game:
             new_seeker = self.get_current_seeker()
             return True, {
                 "result": "wrong",
-                "message": f"❌ WRONG! {seeker['name']} pointed at {chosen_player['name']} (had {chosen_role}) {bet_msg}",
+                "message": f"❌ WRONG! {seeker['name']} pointed at {chosen_player['name']} (had {chosen_role_full}) {bet_msg}",
                 "swap": f"🔄 Swapped: {old_seeker_role} ↔ {old_chosen_role}",
                 "new_seeker": new_seeker["name"] if new_seeker else "Unknown"
             }
@@ -289,8 +300,8 @@ class Game:
             return f"⏳ Waiting for players... ({len(self.players)}/{self.mode})"
         elif self.status == "playing":
             seeker = self.get_current_seeker()
-            target = self.targets[self.current_level]
-            points = self.points[self.current_level]
+            target = self.get_target_role()
+            points = self.get_points()
             return f"🎯 Level {self.current_level+1}/{len(self.targets)}: {seeker['name']} searching for {target} (+{points} points)"
         else:
             return "🏁 Game Over!"
@@ -398,6 +409,7 @@ def handle_guess(call):
                     save_game_data()
                 else:
                     next_seeker = game.get_current_seeker()
+                    # Send new message with buttons for next seeker
                     bot.send_message(
                         chat_id,
                         f"{result['message']}\n\n"
@@ -405,19 +417,22 @@ def handle_guess(call):
                         f"🎯 **Target:** {result['next_target']}\n"
                         f"⭐ **Points:** {result['next_points']}\n\n"
                         f"💡 Click a button to guess!",
-                        reply_markup=get_player_buttons(game, next_seeker["id"], chat_id)
+                        reply_markup=get_player_buttons(game, next_seeker["id"], chat_id),
+                        parse_mode='Markdown'
                     )
                     reset_timer(chat_id, game)
                     save_game_data()
             else:
                 new_seeker = game.get_current_seeker()
+                # Send new message with buttons for new seeker
                 bot.send_message(
                     chat_id,
                     f"{result['message']}\n{result['swap']}\n\n"
                     f"👑 **New Seeker:** {new_seeker['name']}\n"
                     f"⏱️ Timer restarted!\n\n"
                     f"💡 Click a button to guess!",
-                    reply_markup=get_player_buttons(game, new_seeker["id"], chat_id)
+                    reply_markup=get_player_buttons(game, new_seeker["id"], chat_id),
+                    parse_mode='Markdown'
                 )
                 reset_timer(chat_id, game)
                 save_game_data()
@@ -471,12 +486,10 @@ def handle_cancel(call):
 def start_command(message):
     chat_id = message.chat.id
     
-    # DM - Show help
     if chat_id > 0:
         send_help(message)
         return
     
-    # Group - Check if user can start
     if chat_id not in active_games:
         bot.reply_to(message, "❌ No game found! Use /game to create one.")
         return
@@ -487,22 +500,18 @@ def start_command(message):
         bot.reply_to(message, "❌ Game already started or ended!")
         return
     
-    # Check if user is admin OR creator
     if not is_admin_or_creator(message, game):
         bot.reply_to(message, "❌ Only the game creator or group admin can start the game!")
         return
     
-    # Delete the /start command message (so it's not visible)
     try:
         bot.delete_message(chat_id, message.message_id)
     except:
         pass
     
-    # Start the game
     success, result = game.start_game()
     
     if success:
-        # Send role cards via DM
         for player in game.players:
             role = game.get_player_role(player["id"])
             try:
@@ -514,7 +523,6 @@ def start_command(message):
             except:
                 pass
         
-        # Send group message with inline buttons
         msg = bot.send_message(
             chat_id, 
             f"🎮 **GAME STARTED!**\n\n"
@@ -527,9 +535,7 @@ def start_command(message):
             parse_mode='Markdown'
         )
         
-        # Store message ID so we can delete it later if needed
         game.start_message_id = msg.message_id
-        
         start_timer(chat_id, game)
         save_game_data()
     else:
@@ -582,12 +588,10 @@ def game_command(message):
     user_id = message.from_user.id
     user_name = get_player_name(message.from_user)
     
-    # Only works in groups
     if chat_id > 0:
         bot.reply_to(message, "❌ This command only works in groups!")
         return
     
-    # Create game if doesn't exist
     if chat_id not in active_games:
         bot.reply_to(
             message,
@@ -603,12 +607,10 @@ def game_command(message):
         bot.reply_to(message, "❌ Game already in progress!")
         return
     
-    # Add player to existing game
     success, msg = game.add_player(user_id, user_name)
     bot.reply_to(message, msg)
     if success:
         save_game_data()
-        # Show current players
         player_list = "\n".join([f"• {p['name']}" for p in game.players])
         bot.send_message(
             chat_id,
