@@ -3,6 +3,7 @@ import random
 import time
 import threading
 import json
+import re
 from datetime import datetime
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
@@ -21,19 +22,27 @@ game_history = {}
 # ===== HELPER FUNCTIONS =====
 
 def is_admin_or_creator(message, game):
+    """Check if user is Bot Owner, Game Creator, or Group Admin"""
+    # Bot Owner
     if message.from_user.id == BOT_OWNER_ID:
         return True
+    
+    # Game Creator
     if game and game.creator_id == message.from_user.id:
         return True
+    
+    # Group Admin
     try:
         chat_member = bot.get_chat_member(message.chat.id, message.from_user.id)
         if chat_member.status in ['administrator', 'creator']:
             return True
     except:
         pass
+    
     return False
 
 def is_bot_owner(message):
+    """Check if user is Bot Owner"""
     return message.from_user.id == BOT_OWNER_ID
 
 def get_player_name(user):
@@ -82,6 +91,7 @@ def delete_message(chat_id, message_id):
 # ===== INLINE KEYBOARD FUNCTIONS =====
 
 def get_player_buttons(game, seeker_id, chat_id):
+    """Generate inline keyboard with player names for guessing"""
     markup = InlineKeyboardMarkup(row_width=2)
     buttons = []
     for p in game.players:
@@ -95,12 +105,23 @@ def get_player_buttons(game, seeker_id, chat_id):
     return markup
 
 def get_mode_buttons():
+    """Generate inline keyboard for mode selection"""
     markup = InlineKeyboardMarkup(row_width=2)
     buttons = [
         InlineKeyboardButton("👑 4 Players", callback_data="mode_4"),
         InlineKeyboardButton("👑 6 Players", callback_data="mode_6"),
         InlineKeyboardButton("👑 8 Players", callback_data="mode_8"),
         InlineKeyboardButton("👑 10 Players", callback_data="mode_10")
+    ]
+    markup.add(*buttons)
+    return markup
+
+def get_admin_buttons(chat_id):
+    """Generate inline keyboard for admin actions"""
+    markup = InlineKeyboardMarkup(row_width=2)
+    buttons = [
+        InlineKeyboardButton("⏹️ Stop Game", callback_data=f"stop_{chat_id}"),
+        InlineKeyboardButton("🔄 Reset Game", callback_data=f"reset_{chat_id}")
     ]
     markup.add(*buttons)
     return markup
@@ -114,7 +135,7 @@ class Game:
         self.players = []
         self.roles = MODES[mode]["roles"].copy()
         self.points = MODES[mode]["points"].copy()
-        self.targets = MODES[mode]["targets"].copy()  # These are plain text: "Queen", "Minister", etc.
+        self.targets = MODES[mode]["targets"].copy()
         self.current_level = 0
         self.status = "waiting"
         self.card_map = {}
@@ -166,7 +187,7 @@ class Game:
         self.bets = {}
         
         seeker = self.get_current_seeker()
-        target = self.get_target_role()  # This returns plain text like "Queen"
+        target = self.get_target_role()
         
         return True, {
             "message": f"🎮 Game started! {len(self.players)} players, {self.mode}-Player Mode",
@@ -176,22 +197,17 @@ class Game:
         }
     
     def get_current_seeker(self):
-        role = self.roles[self.current_level]  # This is full role with emoji: "👑 King"
+        if self.current_level >= len(self.roles):
+            return None
+        role = self.roles[self.current_level]
         for player in self.players:
             if self.card_map.get(player["id"]) == role:
                 return player
         return None
     
     def get_target_role(self):
-        # Returns plain text target name (no emoji): "Queen", "Minister", etc.
         if self.current_level < len(self.targets):
             return self.targets[self.current_level]
-        return None
-    
-    def get_target_role_with_emoji(self):
-        # Returns full role with emoji: "👸 Queen"
-        if self.current_level < len(self.roles):
-            return self.roles[self.current_level + 1] if self.current_level + 1 < len(self.roles) else None
         return None
     
     def get_points(self):
@@ -207,18 +223,13 @@ class Game:
         if not seeker or seeker["id"] != seeker_id:
             return False, "❌ It's not your turn!"
         
-        # Get target role (plain text like "Queen")
         target_role = self.get_target_role()
         if not target_role:
             return False, "❌ No target found!"
         
-        # Get chosen player's role (full with emoji like "👸 Queen")
         chosen_role_full = self.card_map.get(chosen_player_id, "Unknown")
         
-        # Extract plain role name (remove emoji and spaces)
-        # "👸 Queen" -> "Queen"
-        # "👑 King" -> "King"
-        import re
+        # Remove emoji for comparison
         chosen_role_plain = re.sub(r'[^\w\s]', '', chosen_role_full).strip()
         
         chosen_player = self.get_player(chosen_player_id)
@@ -227,7 +238,6 @@ class Game:
         
         bet_amount = self.bets.get(seeker_id, 0)
         
-        # Compare plain text roles
         if chosen_role_plain == target_role:
             points = self.get_points()
             seeker["points"] += points
@@ -302,7 +312,7 @@ class Game:
             seeker = self.get_current_seeker()
             target = self.get_target_role()
             points = self.get_points()
-            return f"🎯 Level {self.current_level+1}/{len(self.targets)}: {seeker['name']} searching for {target} (+{points} points)"
+            return f"🎯 Level {self.current_level+1}/{len(self.targets)}: {seeker['name'] if seeker else 'Unknown'} searching for {target} (+{points} points)"
         else:
             return "🏁 Game Over!"
     
@@ -336,17 +346,19 @@ def start_timer(chat_id, game):
                                     bot.send_message(chat_id, f"🎉🏆 {result['message']}")
                                     show_leaderboard_func(chat_id)
                                 else:
+                                    next_seeker = current_game.get_current_seeker()
                                     bot.send_message(chat_id, 
                                         f"{result['message']}\n\n"
-                                        f"👑 Next Seeker: {result['next_seeker']}\n"
+                                        f"👑 Next Seeker: {next_seeker['name'] if next_seeker else 'Unknown'}\n"
                                         f"🎯 Target: {result['next_target']}\n"
                                         f"⭐ Points: {result['next_points']}"
                                     )
                                     start_timer(chat_id, current_game)
                             else:
+                                new_seeker = current_game.get_current_seeker()
                                 bot.send_message(chat_id, 
                                     f"{result['message']}\n{result['swap']}\n\n"
-                                    f"👑 New Seeker: {result['new_seeker']}"
+                                    f"👑 New Seeker: {new_seeker['name'] if new_seeker else 'Unknown'}"
                                 )
                                 start_timer(chat_id, current_game)
                 except Exception as e:
@@ -409,7 +421,6 @@ def handle_guess(call):
                     save_game_data()
                 else:
                     next_seeker = game.get_current_seeker()
-                    # Send new message with buttons for next seeker
                     bot.send_message(
                         chat_id,
                         f"{result['message']}\n\n"
@@ -424,7 +435,6 @@ def handle_guess(call):
                     save_game_data()
             else:
                 new_seeker = game.get_current_seeker()
-                # Send new message with buttons for new seeker
                 bot.send_message(
                     chat_id,
                     f"{result['message']}\n{result['swap']}\n\n"
@@ -480,6 +490,72 @@ def handle_cancel(call):
         pass
     bot.answer_callback_query(call.id, "❌ Cancelled")
 
+@bot.callback_query_handler(func=lambda call: call.data.startswith('stop_'))
+def handle_stop(call):
+    chat_id = int(call.data.split('_')[1])
+    user_id = call.from_user.id
+    
+    if chat_id not in active_games:
+        bot.answer_callback_query(call.id, "❌ No active game!", show_alert=True)
+        return
+    
+    game = active_games[chat_id]
+    
+    # Create a fake message object for permission check
+    class FakeMessage:
+        pass
+    fake_msg = FakeMessage()
+    fake_msg.from_user = call.from_user
+    fake_msg.chat = call.message.chat
+    
+    if not is_admin_or_creator(fake_msg, game):
+        bot.answer_callback_query(call.id, "❌ Only admin or creator can stop the game!", show_alert=True)
+        return
+    
+    try:
+        bot.delete_message(chat_id, call.message.message_id)
+    except:
+        pass
+    
+    game.status = "ended"
+    bot.send_message(chat_id, "⏹️ **Game stopped by admin!** Final Results:", parse_mode='Markdown')
+    show_leaderboard_func(chat_id)
+    save_game_data()
+    bot.answer_callback_query(call.id, "✅ Game stopped!")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('reset_'))
+def handle_reset(call):
+    chat_id = int(call.data.split('_')[1])
+    user_id = call.from_user.id
+    
+    if chat_id not in active_games:
+        bot.answer_callback_query(call.id, "❌ No active game!", show_alert=True)
+        return
+    
+    game = active_games[chat_id]
+    
+    class FakeMessage:
+        pass
+    fake_msg = FakeMessage()
+    fake_msg.from_user = call.from_user
+    fake_msg.chat = call.message.chat
+    
+    if not is_admin_or_creator(fake_msg, game):
+        bot.answer_callback_query(call.id, "❌ Only admin or creator can reset!", show_alert=True)
+        return
+    
+    try:
+        bot.delete_message(chat_id, call.message.message_id)
+    except:
+        pass
+    
+    del active_games[chat_id]
+    if chat_id in game_timers:
+        del game_timers[chat_id]
+    bot.send_message(chat_id, "🔄 **Game reset!** Use /game to start new game.", parse_mode='Markdown')
+    save_game_data()
+    bot.answer_callback_query(call.id, "✅ Game reset!")
+
 # ===== BOT COMMANDS =====
 
 @bot.message_handler(commands=['start'])
@@ -530,7 +606,8 @@ def start_command(message):
             f"🎯 **Target:** {result['target']}\n"
             f"⭐ **Points:** {result['points']}\n"
             f"⏱️ You have **{TIMER_SECONDS}** seconds!\n\n"
-            f"💡 Click a button to guess!",
+            f"💡 Click a button to guess!\n\n"
+            f"🔐 Admin: Use /stop or /reset to manage game",
             reply_markup=get_player_buttons(game, result['seeker']["id"], chat_id),
             parse_mode='Markdown'
         )
@@ -572,6 +649,16 @@ Click player buttons to guess!
 **🃏 Your Info:**
 `/mycard` - See your role
 `/status` - Game status
+
+**🔐 Admin Commands:**
+`/stop` - Stop ongoing game
+`/reset` - Reset game
+`/kick @player` - Kick a player
+
+**👑 Owner Commands:**
+`/addcoins @player X` - Add coins
+`/removecoins @player X` - Remove coins
+`/setcoins @player X` - Set exact coins
 
 **⚡ Rules:**
 • 30-second timer per guess
@@ -775,6 +862,30 @@ def show_status(message):
     
     bot.reply_to(message, msg, parse_mode='Markdown')
 
+@bot.message_handler(commands=['stop'])
+def stop_game(message):
+    chat_id = message.chat.id
+    
+    if chat_id not in active_games:
+        bot.reply_to(message, "❌ No active game!")
+        return
+    
+    game = active_games[chat_id]
+    
+    if not is_admin_or_creator(message, game):
+        bot.reply_to(message, "❌ Only admin or creator can stop the game!")
+        return
+    
+    if game.status != "playing":
+        bot.reply_to(message, "❌ Game is not active!")
+        return
+    
+    game.status = "ended"
+    bot.reply_to(message, "⏹️ **Game stopped by admin!** Final Results:", parse_mode='Markdown')
+    show_leaderboard(message)
+    show_coin_leaderboard(message)
+    save_game_data()
+
 @bot.message_handler(commands=['reset'])
 def reset_game(message):
     chat_id = message.chat.id
@@ -840,7 +951,7 @@ def show_history(message):
     
     bot.reply_to(message, msg, parse_mode='Markdown')
 
-# ===== BOT OWNER COMMANDS =====
+# ===== BOT OWNER COMMANDS (Coin Management) =====
 
 @bot.message_handler(commands=['addcoins'])
 def add_coins(message):
@@ -920,6 +1031,65 @@ def remove_coins(message):
     
     target["coins"] -= amount
     bot.reply_to(message, f"✅ Removed {amount} coins from {target['name']}! New balance: {target['coins']}")
+    save_game_data()
+
+@bot.message_handler(commands=['setcoins'])
+def set_coins(message):
+    if not is_bot_owner(message):
+        bot.reply_to(message, "❌ Only Bot Owner can use this!")
+        return
+    
+    args = message.text.split()
+    if len(args) < 3:
+        bot.reply_to(message, "❌ Usage: /setcoins @player amount")
+        return
+    
+    target_name = args[1].replace('@', '').strip()
+    try:
+        amount = int(args[2])
+        if amount < 0:
+            bot.reply_to(message, "❌ Amount cannot be negative!")
+            return
+    except:
+        bot.reply_to(message, "❌ Please enter a valid number!")
+        return
+    
+    chat_id = message.chat.id
+    if chat_id not in active_games:
+        bot.reply_to(message, "❌ No active game!")
+        return
+    
+    game = active_games[chat_id]
+    target = None
+    for p in game.players:
+        if p["name"].lower() == target_name.lower():
+            target = p
+            break
+    
+    if not target:
+        bot.reply_to(message, f"❌ Player '{target_name}' not found!")
+        return
+    
+    target["coins"] = amount
+    bot.reply_to(message, f"✅ Set {target['name']}'s coins to {amount}!")
+    save_game_data()
+
+@bot.message_handler(commands=['resetcoins'])
+def reset_all_coins(message):
+    if not is_bot_owner(message):
+        bot.reply_to(message, "❌ Only Bot Owner can use this!")
+        return
+    
+    chat_id = message.chat.id
+    if chat_id not in active_games:
+        bot.reply_to(message, "❌ No active game!")
+        return
+    
+    game = active_games[chat_id]
+    for p in game.players:
+        p["coins"] = STARTING_COINS
+    
+    bot.reply_to(message, f"✅ Reset all players to {STARTING_COINS} coins!")
     save_game_data()
 
 @bot.message_handler(commands=['kick'])
