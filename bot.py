@@ -101,7 +101,6 @@ def get_player_buttons(game, seeker_id, chat_id):
     
     # If no active players left, show special message
     if not active_players:
-        bot.send_message(chat_id, "❌ No active players left to guess!")
         return None
     
     for p in active_players:
@@ -132,7 +131,8 @@ class Game:
         self.total_rounds = 0
         self.bets = {}
         self.start_message_id = None
-        self.found_players = []  # Track players who already found their target
+        self.found_players = []
+        self.timer_active = False
         
     def add_player(self, player_id, player_name):
         if len(self.players) >= self.mode:
@@ -174,7 +174,8 @@ class Game:
         self.current_level = 0
         self.total_rounds += 1
         self.bets = {}
-        self.found_players = []  # Reset found players
+        self.found_players = []
+        self.timer_active = False
         
         seeker = self.get_current_seeker()
         target = self.get_target_role()
@@ -204,6 +205,10 @@ class Game:
         if self.current_level < len(self.points):
             return self.points[self.current_level]
         return 0
+    
+    def get_active_players(self):
+        """Get players who haven't been found yet"""
+        return [p for p in self.players if p["id"] not in self.found_players]
     
     def make_guess(self, seeker_id, chosen_player_id):
         if self.status != "playing":
@@ -244,6 +249,7 @@ class Game:
             
             if self.current_level >= len(self.targets):
                 self.status = "ended"
+                self.timer_active = False
                 return True, {
                     "result": "correct",
                     "message": f"🎉🏆 {seeker['name']} found {target_role}! GAME OVER! Winner: {seeker['name']} with {seeker['points']} points! {bet_msg}",
@@ -305,7 +311,7 @@ class Game:
             seeker = self.get_current_seeker()
             target = self.get_target_role()
             points = self.get_points()
-            active_count = len([p for p in self.players if p["id"] not in self.found_players])
+            active_count = len(self.get_active_players())
             return f"🎯 Level {self.current_level+1}/{len(self.targets)}: {seeker['name'] if seeker else 'Unknown'} → {target} (+{points} pts)\n👥 Active players left: {active_count}"
         else:
             return "🏁 Game Over!"
@@ -318,19 +324,37 @@ class Game:
 
 # ===== TIMER SYSTEM =====
 
-def start_timer(chat_id, game):
+def start_timer(chat_id, game, message_id=None):
+    """Start 30-second timer for current turn"""
+    
+    # Cancel any existing timer
+    game.timer_active = False
+    time.sleep(0.1)  # Small delay to ensure clean start
+    
+    game.timer_active = True
+    
     def timer_func():
         time.sleep(TIMER_SECONDS)
+        
+        # Check if timer is still active and game is still playing
+        if not game.timer_active:
+            return
+        
         if chat_id in active_games and active_games[chat_id].status == "playing":
             current_game = active_games[chat_id]
             seeker = current_game.get_current_seeker()
             
-            if seeker:
+            if seeker and current_game.timer_active:
                 try:
-                    bot.send_message(chat_id, f"⏱️ **TIME'S UP!** {seeker['name']} took too long!\n❌ Counted as WRONG guess!", parse_mode='Markdown')
+                    bot.send_message(
+                        chat_id, 
+                        f"⏱️ **TIME'S UP!** {seeker['name']} took too long!\n❌ Counted as WRONG guess!", 
+                        parse_mode='Markdown'
+                    )
                     
-                    # Get active players (not found yet)
-                    active_players = [p for p in current_game.players if p["id"] != seeker["id"] and p["id"] not in current_game.found_players]
+                    # Auto-guess as WRONG - pick a random active player (not seeker)
+                    active_players = [p for p in current_game.get_active_players() if p["id"] != seeker["id"]]
+                    
                     if active_players:
                         random_target = random.choice(active_players)
                         success, result = current_game.make_guess(seeker["id"], random_target["id"])
@@ -340,22 +364,29 @@ def start_timer(chat_id, game):
                                 if result.get("game_over"):
                                     bot.send_message(chat_id, f"🎉🏆 {result['message']}")
                                     show_leaderboard_func(chat_id)
+                                    save_game_data()
                                 else:
                                     next_seeker = current_game.get_current_seeker()
                                     buttons = get_player_buttons(current_game, next_seeker["id"], chat_id)
                                     if buttons:
+                                        active_count = len(current_game.get_active_players())
                                         bot.send_message(
                                             chat_id,
                                             f"{result['message']}\n\n"
                                             f"👑 **Next Seeker:** {next_seeker['name']}\n"
                                             f"🎯 **Target:** {result['next_target']}\n"
                                             f"⭐ **Points:** {result['next_points']}\n"
-                                            f"👥 **Active Players:** {len([p for p in current_game.players if p['id'] not in current_game.found_players])}\n\n"
+                                            f"👥 **Active Players:** {active_count}\n\n"
                                             f"💡 Click a button to guess!",
                                             reply_markup=buttons,
                                             parse_mode='Markdown'
                                         )
                                         start_timer(chat_id, current_game)
+                                    else:
+                                        bot.send_message(chat_id, "❌ No active players left!")
+                                        current_game.status = "ended"
+                                        current_game.timer_active = False
+                                        save_game_data()
                             else:
                                 new_seeker = current_game.get_current_seeker()
                                 buttons = get_player_buttons(current_game, new_seeker["id"], chat_id)
@@ -370,6 +401,17 @@ def start_timer(chat_id, game):
                                         parse_mode='Markdown'
                                     )
                                     start_timer(chat_id, current_game)
+                                else:
+                                    bot.send_message(chat_id, "❌ No active players left!")
+                                    current_game.status = "ended"
+                                    current_game.timer_active = False
+                                    save_game_data()
+                    else:
+                        bot.send_message(chat_id, "❌ No active players left to guess!")
+                        current_game.status = "ended"
+                        current_game.timer_active = False
+                        save_game_data()
+                        
                 except Exception as e:
                     print(f"Timer error: {e}")
     
@@ -378,6 +420,9 @@ def start_timer(chat_id, game):
     timer_thread.start()
 
 def reset_timer(chat_id, game):
+    """Reset timer for new turn"""
+    game.timer_active = False
+    time.sleep(0.2)
     start_timer(chat_id, game)
 
 def show_leaderboard_func(chat_id):
@@ -415,14 +460,26 @@ def handle_guess(call):
         
         game = active_games[chat_id]
         
+        if game.status != "playing":
+            bot.answer_callback_query(call.id, "❌ Game is not active!", show_alert=True)
+            return
+        
         # Check if chosen player is already found
         if chosen_id in game.found_players:
             bot.answer_callback_query(call.id, "❌ This player already found their target!", show_alert=True)
             return
         
+        # Check if chosen player is the seeker
+        if chosen_id == seeker_id:
+            bot.answer_callback_query(call.id, "❌ You can't guess yourself!", show_alert=True)
+            return
+        
         success, result = game.make_guess(seeker_id, chosen_id)
         
         if success:
+            # Cancel timer
+            game.timer_active = False
+            
             try:
                 bot.delete_message(chat_id, call.message.message_id)
             except:
@@ -437,24 +494,27 @@ def handle_guess(call):
                     next_seeker = game.get_current_seeker()
                     buttons = get_player_buttons(game, next_seeker["id"], chat_id)
                     if buttons:
+                        active_count = len(game.get_active_players())
                         bot.send_message(
                             chat_id,
                             f"{result['message']}\n\n"
                             f"👑 **Next Seeker:** {next_seeker['name']}\n"
                             f"🎯 **Target:** {result['next_target']}\n"
                             f"⭐ **Points:** {result['next_points']}\n"
-                            f"👥 **Active Players:** {len([p for p in game.players if p['id'] not in game.found_players])}\n\n"
+                            f"👥 **Active Players:** {active_count}\n\n"
                             f"💡 Click a button to guess!",
                             reply_markup=buttons,
                             parse_mode='Markdown'
                         )
-                        reset_timer(chat_id, game)
+                        start_timer(chat_id, game)
                         save_game_data()
                     else:
                         bot.send_message(chat_id, "❌ No active players left!")
                         game.status = "ended"
+                        game.timer_active = False
                         save_game_data()
             else:
+                # WRONG guess - let new seeker choose
                 new_seeker = game.get_current_seeker()
                 buttons = get_player_buttons(game, new_seeker["id"], chat_id)
                 if buttons:
@@ -467,12 +527,20 @@ def handle_guess(call):
                         reply_markup=buttons,
                         parse_mode='Markdown'
                     )
-                    reset_timer(chat_id, game)
+                    start_timer(chat_id, game)
                     save_game_data()
+                else:
+                    bot.send_message(chat_id, "❌ No active players left!")
+                    game.status = "ended"
+                    game.timer_active = False
+                    save_game_data()
+            
+            bot.answer_callback_query(call.id, "✅ Done!")
         else:
             bot.answer_callback_query(call.id, f"❌ {result}", show_alert=True)
             
     except Exception as e:
+        print(f"Callback error: {e}")
         bot.answer_callback_query(call.id, "❌ Error", show_alert=True)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('cancel_'))
@@ -667,13 +735,14 @@ def start_game_command(message):
         
         buttons = get_player_buttons(game, result['seeker']["id"], chat_id)
         if buttons:
+            active_count = len(game.get_active_players())
             msg = bot.send_message(
                 chat_id, 
                 f"🎮 **GAME STARTED!**\n\n"
                 f"👑 **Seeker:** {result['seeker']['name']}\n"
                 f"🎯 **Target:** {result['target']}\n"
                 f"⭐ **Points:** {result['points']}\n"
-                f"👥 **Active Players:** {len([p for p in game.players if p['id'] not in game.found_players])}\n"
+                f"👥 **Active Players:** {active_count}\n"
                 f"⏱️ You have **{TIMER_SECONDS}** seconds!\n\n"
                 f"💡 Click a button to guess!",
                 reply_markup=buttons,
@@ -682,6 +751,10 @@ def start_game_command(message):
             
             game.start_message_id = msg.message_id
             start_timer(chat_id, game)
+            save_game_data()
+        else:
+            bot.send_message(chat_id, "❌ No active players to guess!")
+            game.status = "ended"
             save_game_data()
     else:
         bot.send_message(chat_id, f"❌ {result}")
@@ -801,7 +874,7 @@ def show_status(message):
     
     msg = f"📊 **GAME STATUS**\n\n{status}\n\n"
     msg += f"👥 **Players:** {len(game.players)}/{game.mode}\n"
-    active_count = len([p for p in game.players if p["id"] not in game.found_players])
+    active_count = len(game.get_active_players())
     msg += f"✅ **Found Players:** {len(game.found_players)}\n"
     msg += f"🔄 **Active Players:** {active_count}\n"
     
@@ -871,6 +944,7 @@ def stop_game(message):
         return
     
     game.status = "ended"
+    game.timer_active = False
     bot.reply_to(message, "⏹️ **Game stopped!**", parse_mode='Markdown')
     show_leaderboard(message)
     save_game_data()
@@ -888,6 +962,8 @@ def reset_game(message):
         return
     
     if chat_id in active_games:
+        game = active_games[chat_id]
+        game.timer_active = False
         del active_games[chat_id]
         if chat_id in game_timers:
             del game_timers[chat_id]
@@ -1106,4 +1182,3 @@ if __name__ == '__main__':
     
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
-    
