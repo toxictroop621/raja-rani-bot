@@ -80,10 +80,9 @@ def delete_message(chat_id, message_id):
     except:
         pass
 
-# ===== INLINE KEYBOARD FUNCTIONS (Only for Guessing) =====
+# ===== INLINE KEYBOARD FUNCTIONS =====
 
 def get_player_buttons(game, seeker_id, chat_id):
-    """Only inline buttons for guessing - fast and responsive"""
     markup = InlineKeyboardMarkup(row_width=2)
     buttons = []
     for p in game.players:
@@ -361,7 +360,7 @@ def show_leaderboard_func(chat_id):
         msg += f"{medal} {p['name']} - **{p['points']}** pts ({role})\n"
     bot.send_message(chat_id, msg, parse_mode='Markdown')
 
-# ===== CALLBACK HANDLERS (Only for Guessing) =====
+# ===== CALLBACK HANDLERS =====
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('guess_'))
 def handle_guess(call):
@@ -442,28 +441,16 @@ def handle_cancel(call):
 
 @bot.message_handler(commands=['start'])
 def start_command(message):
-    if message.chat.id > 0:
-        send_help(message)
-        return
-    show_menu(message.chat.id)
-
-@bot.message_handler(commands=['help'])
-def send_help(message):
+    """Welcome message - always shows help"""
     help_text = """
 🎮 **RAJA RANI BOT** 🎮
 
-**📌 Commands:**
-
-🎯 **Game Setup:**
-`/game` - Show game menu
-`/join` - Join the game
+📌 **Commands:**
+`/game` - Create or join a game
+`/join` - Join existing game
 `/mode 4/6/8/10` - Choose player count
-`/start` - Start game (Admin/Creator only)
-
-💰 **Betting:**
+`/startgame` - Start game (Admin/Creator only)
 `/bet X` - Bet 10-50 coins
-
-📊 **Info:**
 `/score` - Points leaderboard
 `/coins` - Coins leaderboard  
 `/mycard` - Your role & stats
@@ -471,85 +458,63 @@ def send_help(message):
 `/players` - List players
 `/history` - Swap history
 
-🔐 **Admin:**
-`/stop` - Stop ongoing game
-`/reset` - Reset game
-`/kick @player` - Kick player
-
-👑 **Owner:**
-`/addcoins @player X` - Add coins
-`/removecoins @player X` - Remove coins
-`/setcoins @player X` - Set exact coins
-
-**⚡ Rules:**
+⚡ **Rules:**
 • 30-second timer per guess
 • Wrong guess = SWAP cards!
-• Correct guess = Earn points + coins!
+• Correct guess = Earn points!
+
+🔐 **Admin:** `/stop`, `/reset`, `/kick @player`
 
 *Enjoy!* 🎉
     """
     bot.reply_to(message, help_text, parse_mode='Markdown')
 
-def show_menu(chat_id):
-    """Show active command menu without inline buttons"""
-    game = active_games.get(chat_id)
-    
-    menu = """
-🎮 **RAJA RANI GAME MENU** 🎮
-
-**Commands:**
-• `/join` - Join the game
-• `/mode 4/6/8/10` - Choose player count
-• `/start` - Start game (Admin/Creator only)
-• `/bet X` - Bet 10-50 coins
-• `/score` - Points leaderboard
-• `/coins` - Coins leaderboard
-• `/mycard` - Your role & stats
-• `/status` - Game status
-• `/players` - List players
-• `/history` - Swap history
-
-🔐 **Admin:** `/stop`, `/reset`, `/kick @player`
-👑 **Owner:** `/addcoins`, `/removecoins`, `/setcoins`
-    """
-    
-    if game:
-        menu += f"\n\n📊 **Current Game:** {game.mode}-Player Mode\n"
-        menu += f"👥 **Players:** {len(game.players)}/{game.mode}\n"
-        menu += f"📌 **Status:** {game.status}"
-        
-        if game.status == "waiting":
-            menu += "\n\n💡 Use `/start` to begin (Admin/Creator only)"
-        elif game.status == "playing":
-            seeker = game.get_current_seeker()
-            if seeker:
-                menu += f"\n\n👑 **Seeker:** {seeker['name']}"
-                menu += f"\n🎯 **Target:** {game.get_target_role()}"
-                menu += f"\n⭐ **Points:** {game.get_points()}"
-                menu += f"\n⏱️ **Timer:** {TIMER_SECONDS}s"
-        elif game.status == "ended":
-            menu += "\n\n🏁 Game Over! Use `/reset` to start new"
-    else:
-        menu += "\n\n❌ No active game! Use `/game` to create one."
-    
-    bot.send_message(chat_id, menu, parse_mode='Markdown')
+@bot.message_handler(commands=['help'])
+def help_command(message):
+    """Same as /start - shows help"""
+    start_command(message)
 
 @bot.message_handler(commands=['game'])
 def game_command(message):
-    if message.chat.id > 0:
+    """Create or show game menu"""
+    chat_id = message.chat.id
+    
+    if chat_id > 0:
         bot.reply_to(message, "❌ This command only works in groups!")
         return
     
-    chat_id = message.chat.id
     user_id = message.from_user.id
     
     # Create game if none exists
     if chat_id not in active_games:
         active_games[chat_id] = Game(mode=4, creator_id=user_id)
-        bot.reply_to(message, "🎮 **Game created!** Default mode: 4 Players\nUse `/mode 4/6/8/10` to change\nUse `/join` to join!", parse_mode='Markdown')
+        bot.reply_to(
+            message, 
+            "🎮 **Game created!**\n\n"
+            "📌 Default mode: 4 Players\n"
+            "🔄 Use `/mode 4/6/8/10` to change\n"
+            "👋 Use `/join` to join!\n"
+            "🚀 Use `/startgame` to begin (Creator/Admin only)!",
+            parse_mode='Markdown'
+        )
         save_game_data()
     else:
-        show_menu(chat_id)
+        game = active_games[chat_id]
+        if game.status == "playing":
+            bot.reply_to(message, "❌ Game already in progress!")
+            return
+        
+        player_list = "\n".join([f"• {p['name']}" for p in game.players]) if game.players else "No players yet"
+        bot.send_message(
+            chat_id,
+            f"🎮 **Game Menu**\n\n"
+            f"📌 Mode: {game.mode}-Player\n"
+            f"👥 Players: {len(game.players)}/{game.mode}\n\n"
+            f"{player_list}\n\n"
+            f"👋 Use `/join` to join!\n"
+            f"🚀 Use `/startgame` to begin (Creator/Admin only)!",
+            parse_mode='Markdown'
+        )
 
 @bot.message_handler(commands=['join'])
 def join_game(message):
@@ -580,9 +545,8 @@ def join_game(message):
         bot.send_message(
             chat_id,
             f"👥 **Players ({len(game.players)}/{game.mode}):**\n\n{player_list}\n\n"
-            f"👑 **Creator:** <code>{game.creator_id}</code>\n"
-            f"💡 Use `/start` to begin (Admin/Creator only)!",
-            parse_mode='HTML'
+            f"🚀 Use `/startgame` to begin (Creator/Admin only)!",
+            parse_mode='Markdown'
         )
 
 @bot.message_handler(commands=['mode'])
@@ -613,16 +577,17 @@ def set_mode(message):
             message,
             f"✅ Mode set to {mode}-Player mode!\n"
             f"👑 Creator: {message.from_user.first_name}\n\n"
-            f"Use `/join` to join!\n"
-            f"Use `/start` to begin (Creator/Admin only)!",
+            f"👋 Use `/join` to join!\n"
+            f"🚀 Use `/startgame` to begin!",
             parse_mode='Markdown'
         )
         save_game_data()
     except ValueError:
         bot.reply_to(message, "❌ Please enter a valid number!")
 
-@bot.message_handler(commands=['start'])
+@bot.message_handler(commands=['startgame'])
 def start_game_command(message):
+    """Start the game - Creator/Admin only"""
     chat_id = message.chat.id
     
     if chat_id > 0:
@@ -643,14 +608,10 @@ def start_game_command(message):
         bot.reply_to(message, "❌ Only the game creator or group admin can start the game!")
         return
     
-    try:
-        bot.delete_message(chat_id, message.message_id)
-    except:
-        pass
-    
     success, result = game.start_game()
     
     if success:
+        # Send role cards via DM
         for player in game.players:
             role = game.get_player_role(player["id"])
             try:
@@ -662,6 +623,7 @@ def start_game_command(message):
             except:
                 pass
         
+        # Send game start message with guess buttons
         msg = bot.send_message(
             chat_id, 
             f"🎮 **GAME STARTED!**\n\n"
