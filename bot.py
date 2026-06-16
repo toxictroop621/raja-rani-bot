@@ -20,24 +20,28 @@ game_history = {}
 
 # ===== HELPER FUNCTIONS =====
 
-def is_admin(message):
+def is_admin_or_creator(message, game):
+    """Check if user is group admin OR game creator"""
+    # Check if bot owner
     if message.from_user.id == BOT_OWNER_ID:
         return True
+    
+    # Check if game creator
+    if game and game.creator_id == message.from_user.id:
+        return True
+    
+    # Check if group admin
     try:
         chat_member = bot.get_chat_member(message.chat.id, message.from_user.id)
         if chat_member.status in ['administrator', 'creator']:
             return True
     except:
         pass
+    
     return False
 
 def is_bot_owner(message):
     return message.from_user.id == BOT_OWNER_ID
-
-def is_game_creator(chat_id, user_id):
-    if chat_id not in active_games:
-        return False
-    return active_games[chat_id].creator_id == user_id
 
 def get_player_name(user):
     return user.first_name or user.username or "Player"
@@ -77,20 +81,27 @@ def check_dm_access(player_id):
     except:
         return False
 
+def delete_message(chat_id, message_id):
+    """Safely delete a message"""
+    try:
+        bot.delete_message(chat_id, message_id)
+    except:
+        pass
+
 # ===== INLINE KEYBOARD FUNCTIONS =====
 
-def get_player_buttons(game, seeker_id):
-    """Generate inline keyboard with player names"""
+def get_player_buttons(game, seeker_id, chat_id):
+    """Generate inline keyboard with player names for group"""
     markup = InlineKeyboardMarkup(row_width=2)
     buttons = []
     for p in game.players:
         if p["id"] != seeker_id:
             buttons.append(InlineKeyboardButton(
                 p["name"], 
-                callback_data=f"guess_{p['id']}_{seeker_id}"
+                callback_data=f"guess_{chat_id}_{p['id']}_{seeker_id}"
             ))
     # Add cancel button
-    buttons.append(InlineKeyboardButton("❌ Cancel", callback_data="cancel_guess"))
+    buttons.append(InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_{chat_id}"))
     markup.add(*buttons)
     return markup
 
@@ -98,10 +109,10 @@ def get_mode_buttons():
     """Generate inline keyboard for mode selection"""
     markup = InlineKeyboardMarkup(row_width=2)
     buttons = [
-        InlineKeyboardButton("4 Players", callback_data="mode_4"),
-        InlineKeyboardButton("6 Players", callback_data="mode_6"),
-        InlineKeyboardButton("8 Players", callback_data="mode_8"),
-        InlineKeyboardButton("10 Players", callback_data="mode_10")
+        InlineKeyboardButton("👑 4 Players", callback_data="mode_4"),
+        InlineKeyboardButton("👑 6 Players", callback_data="mode_6"),
+        InlineKeyboardButton("👑 8 Players", callback_data="mode_8"),
+        InlineKeyboardButton("👑 10 Players", callback_data="mode_10")
     ]
     markup.add(*buttons)
     return markup
@@ -123,6 +134,7 @@ class Game:
         self.start_time = None
         self.total_rounds = 0
         self.bets = {}
+        self.start_message_id = None  # Store the start message to delete later
         
     def add_player(self, player_id, player_name):
         if len(self.players) >= self.mode:
@@ -130,7 +142,6 @@ class Game:
         if player_id in [p["id"] for p in self.players]:
             return False, "❌ You're already in the game!"
         
-        # Check DM access
         if not check_dm_access(player_id):
             return False, f"❌ {player_name}, please start the bot in DM first! Send /start to @{bot.get_me().username}"
         
@@ -149,7 +160,6 @@ class Game:
         if len(self.players) != self.mode:
             return False, f"❌ This mode needs {self.mode} players! {len(self.players)} joined."
         
-        # Check DM access for all players
         for p in self.players:
             if not check_dm_access(p["id"]):
                 return False, f"❌ {p['name']} hasn't started the bot in DM! They need to send /start to @{bot.get_me().username} first."
@@ -356,15 +366,14 @@ def show_leaderboard_func(chat_id):
 @bot.callback_query_handler(func=lambda call: call.data.startswith('guess_'))
 def handle_guess(call):
     try:
-        _, chosen_id, seeker_id = call.data.split('_')
-        chosen_id = int(chosen_id)
-        seeker_id = int(seeker_id)
+        _, chat_id_str, chosen_id_str, seeker_id_str = call.data.split('_')
+        chat_id = int(chat_id_str)
+        chosen_id = int(chosen_id_str)
+        seeker_id = int(seeker_id_str)
         
-        chat_id = call.message.chat.id
-        player_id = call.from_user.id
+        user_id = call.from_user.id
         
-        # Verify it's the seeker's turn
-        if player_id != seeker_id:
+        if user_id != seeker_id:
             bot.answer_callback_query(call.id, "❌ It's not your turn!", show_alert=True)
             return
         
@@ -374,11 +383,13 @@ def handle_guess(call):
         
         game = active_games[chat_id]
         
-        # Process the guess
         success, result = game.make_guess(seeker_id, chosen_id)
         
         if success:
-            bot.delete_message(chat_id, call.message.message_id)
+            try:
+                bot.delete_message(chat_id, call.message.message_id)
+            except:
+                pass
             
             if result["result"] == "correct":
                 if result.get("game_over"):
@@ -386,14 +397,15 @@ def handle_guess(call):
                     show_leaderboard_func(chat_id)
                     save_game_data()
                 else:
+                    next_seeker = game.get_current_seeker()
                     bot.send_message(
                         chat_id,
                         f"{result['message']}\n\n"
-                        f"👑 **Next Seeker:** {result['next_seeker']}\n"
+                        f"👑 **Next Seeker:** {next_seeker['name']}\n"
                         f"🎯 **Target:** {result['next_target']}\n"
                         f"⭐ **Points:** {result['next_points']}\n\n"
                         f"💡 Click a button to guess!",
-                        reply_markup=get_player_buttons(game, game.get_current_seeker()["id"])
+                        reply_markup=get_player_buttons(game, next_seeker["id"], chat_id)
                     )
                     reset_timer(chat_id, game)
                     save_game_data()
@@ -402,10 +414,10 @@ def handle_guess(call):
                 bot.send_message(
                     chat_id,
                     f"{result['message']}\n{result['swap']}\n\n"
-                    f"👑 **New Seeker:** {new_seeker['name'] if new_seeker else 'Unknown'}\n"
+                    f"👑 **New Seeker:** {new_seeker['name']}\n"
                     f"⏱️ Timer restarted!\n\n"
                     f"💡 Click a button to guess!",
-                    reply_markup=get_player_buttons(game, new_seeker["id"]) if new_seeker else None
+                    reply_markup=get_player_buttons(game, new_seeker["id"], chat_id)
                 )
                 reset_timer(chat_id, game)
                 save_game_data()
@@ -413,7 +425,7 @@ def handle_guess(call):
             bot.answer_callback_query(call.id, f"❌ {result}", show_alert=True)
             
     except Exception as e:
-        bot.answer_callback_query(call.id, f"❌ Error: {str(e)}", show_alert=True)
+        bot.answer_callback_query(call.id, f"❌ Error", show_alert=True)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('mode_'))
 def handle_mode(call):
@@ -427,25 +439,31 @@ def handle_mode(call):
             return
         
         active_games[chat_id] = Game(mode=mode, creator_id=user_id)
-        bot.delete_message(chat_id, call.message.message_id)
+        try:
+            bot.delete_message(chat_id, call.message.message_id)
+        except:
+            pass
         bot.send_message(
             chat_id,
             f"✅ Mode set to {mode}-Player mode!\n"
             f"👑 Game Creator: {call.from_user.first_name}\n\n"
             f"📌 Use /game to join!\n"
-            f"🚀 Use /start to begin the game (Creator only)!",
+            f"🚀 Use /start to begin the game (Creator or Admin only)!",
             parse_mode='Markdown'
         )
         bot.answer_callback_query(call.id, f"✅ {mode}-Player mode set!")
         save_game_data()
     except Exception as e:
-        bot.answer_callback_query(call.id, f"❌ Error: {str(e)}", show_alert=True)
+        bot.answer_callback_query(call.id, f"❌ Error", show_alert=True)
 
-@bot.callback_query_handler(func=lambda call: call.data == 'cancel_guess')
+@bot.callback_query_handler(func=lambda call: call.data.startswith('cancel_'))
 def handle_cancel(call):
-    bot.delete_message(call.message.chat.id, call.message.message_id)
-    bot.send_message(call.message.chat.id, "❌ Guess cancelled!")
-    bot.answer_callback_query(call.id, "Cancelled")
+    chat_id = int(call.data.split('_')[1])
+    try:
+        bot.delete_message(chat_id, call.message.message_id)
+    except:
+        pass
+    bot.answer_callback_query(call.id, "❌ Cancelled")
 
 # ===== BOT COMMANDS =====
 
@@ -453,59 +471,69 @@ def handle_cancel(call):
 def start_command(message):
     chat_id = message.chat.id
     
-    # If in group
-    if chat_id < 0:
-        # Check if user is game creator
-        if chat_id in active_games:
-            game = active_games[chat_id]
-            if game.creator_id == message.from_user.id:
-                # Creator can start game
-                if game.status == "waiting":
-                    success, result = game.start_game()
-                    if success:
-                        # Send role cards via DM
-                        for player in game.players:
-                            role = game.get_player_role(player["id"])
-                            try:
-                                bot.send_message(
-                                    player["id"], 
-                                    f"🃏 Your role: **{role}**\n🤫 Don't tell anyone!\n💰 Coins: {STARTING_COINS}",
-                                    parse_mode='Markdown'
-                                )
-                            except:
-                                pass
-                        
-                        # Send group message with inline buttons
-                        bot.reply_to(
-                            message, 
-                            f"{result['message']}\n\n"
-                            f"👑 **Seeker:** {result['seeker']['name']}\n"
-                            f"🎯 **Target:** {result['target']}\n"
-                            f"⭐ **Points:** {result['points']}\n"
-                            f"⏱️ You have **{TIMER_SECONDS}** seconds!\n\n"
-                            f"💡 Click a button to guess!",
-                            reply_markup=get_player_buttons(game, result['seeker']["id"]),
-                            parse_mode='Markdown'
-                        )
-                        
-                        start_timer(chat_id, game)
-                        save_game_data()
-                        return
-                    else:
-                        bot.reply_to(message, f"❌ {result}")
-                        return
-                else:
-                    bot.reply_to(message, "❌ Game already started or ended!")
-                    return
-            else:
-                bot.reply_to(message, "❌ Only the game creator can start the game!")
-                return
-        else:
-            bot.reply_to(message, "❌ No game found! Use /game to create one.")
-            return
-    
     # DM - Show help
-    send_help(message)
+    if chat_id > 0:
+        send_help(message)
+        return
+    
+    # Group - Check if user can start
+    if chat_id not in active_games:
+        bot.reply_to(message, "❌ No game found! Use /game to create one.")
+        return
+    
+    game = active_games[chat_id]
+    
+    if game.status != "waiting":
+        bot.reply_to(message, "❌ Game already started or ended!")
+        return
+    
+    # Check if user is admin OR creator
+    if not is_admin_or_creator(message, game):
+        bot.reply_to(message, "❌ Only the game creator or group admin can start the game!")
+        return
+    
+    # Delete the /start command message (so it's not visible)
+    try:
+        bot.delete_message(chat_id, message.message_id)
+    except:
+        pass
+    
+    # Start the game
+    success, result = game.start_game()
+    
+    if success:
+        # Send role cards via DM
+        for player in game.players:
+            role = game.get_player_role(player["id"])
+            try:
+                bot.send_message(
+                    player["id"], 
+                    f"🃏 Your role: **{role}**\n🤫 Don't tell anyone!\n💰 Coins: {STARTING_COINS}",
+                    parse_mode='Markdown'
+                )
+            except:
+                pass
+        
+        # Send group message with inline buttons
+        msg = bot.send_message(
+            chat_id, 
+            f"🎮 **GAME STARTED!**\n\n"
+            f"👑 **Seeker:** {result['seeker']['name']}\n"
+            f"🎯 **Target:** {result['target']}\n"
+            f"⭐ **Points:** {result['points']}\n"
+            f"⏱️ You have **{TIMER_SECONDS}** seconds!\n\n"
+            f"💡 Click a button to guess!",
+            reply_markup=get_player_buttons(game, result['seeker']["id"], chat_id),
+            parse_mode='Markdown'
+        )
+        
+        # Store message ID so we can delete it later if needed
+        game.start_message_id = msg.message_id
+        
+        start_timer(chat_id, game)
+        save_game_data()
+    else:
+        bot.send_message(chat_id, f"❌ {result}")
 
 @bot.message_handler(commands=['help'])
 def send_help(message):
@@ -522,7 +550,7 @@ def send_help(message):
 **2. Choose Mode:**
 Click the mode buttons (4/6/8/10 players)
 
-**3. Start Game (Creator only):**
+**3. Start Game (Creator or Admin only):**
 `/start` - Start the game in group
 
 **4. During Game:**
@@ -586,7 +614,7 @@ def game_command(message):
             chat_id,
             f"👥 **Current Players ({len(game.players)}/{game.mode}):**\n\n{player_list}\n\n"
             f"👑 **Game Creator:** {game.creator_id}\n"
-            f"🚀 `/start` to begin (Creator only)!",
+            f"🚀 `/start` to begin (Creator or Admin only)!",
             parse_mode='Markdown'
         )
 
@@ -615,7 +643,7 @@ def set_mode(message):
             f"✅ Mode set to {mode}-Player mode!\n"
             f"👑 Game Creator: {message.from_user.first_name}\n\n"
             f"📌 Use /game to join!\n"
-            f"🚀 Use /start to begin the game (Creator only)!",
+            f"🚀 Use /start to begin the game (Creator or Admin only)!",
             parse_mode='Markdown'
         )
         save_game_data()
@@ -748,8 +776,8 @@ def show_status(message):
 @bot.message_handler(commands=['reset'])
 def reset_game(message):
     chat_id = message.chat.id
-    if not is_admin(message):
-        bot.reply_to(message, "❌ Only admin can reset!")
+    if not is_admin_or_creator(message, active_games.get(chat_id)):
+        bot.reply_to(message, "❌ Only admin or creator can reset!")
         return
     
     if chat_id in active_games:
@@ -764,8 +792,8 @@ def reset_game(message):
 @bot.message_handler(commands=['end'])
 def end_game(message):
     chat_id = message.chat.id
-    if not is_admin(message):
-        bot.reply_to(message, "❌ Only admin can end!")
+    if not is_admin_or_creator(message, active_games.get(chat_id)):
+        bot.reply_to(message, "❌ Only admin or creator can end!")
         return
     
     if chat_id in active_games:
@@ -894,8 +922,8 @@ def remove_coins(message):
 
 @bot.message_handler(commands=['kick'])
 def kick_player(message):
-    if not is_admin(message):
-        bot.reply_to(message, "❌ Only admin can kick players!")
+    if not is_admin_or_creator(message, active_games.get(message.chat.id)):
+        bot.reply_to(message, "❌ Only admin or creator can kick players!")
         return
     
     args = message.text.split()
