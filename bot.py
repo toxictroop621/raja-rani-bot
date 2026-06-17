@@ -49,10 +49,14 @@ set_bot_commands()
 
 # ===== INITIALIZE MONGODB =====
 try:
-    init_collections()
-    print("✅ MongoDB connected successfully!")
+    db = init_collections()
+    if db is not None:
+        print("✅ MongoDB connected successfully!")
+    else:
+        print("⚠️ MongoDB connection failed, using local data")
 except Exception as e:
     print(f"❌ MongoDB connection failed: {e}")
+    print("⚠️ Bot will continue with local data")
 
 # ===== LOAD DATA FROM MONGODB =====
 user_database = load_user_database()
