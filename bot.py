@@ -1853,7 +1853,7 @@ def remove_coins(message):
     save_player_data(player_data)
 
 # ============================================================
-# WEBHOOK
+# WEBHOOK - FIXED
 # ============================================================
 
 @app.route('/' + BOT_TOKEN, methods=['POST'])
@@ -1875,9 +1875,15 @@ if __name__ == '__main__':
     
     WEBHOOK_URL = os.environ.get('WEBHOOK_URL')
     if WEBHOOK_URL:
-        bot.remove_webhook()
-        bot.set_webhook(url=WEBHOOK_URL + '/' + BOT_TOKEN)
-        print(f"✅ Webhook set to: {WEBHOOK_URL}")
+        try:
+            bot.remove_webhook()
+            bot.set_webhook(url=WEBHOOK_URL + '/' + BOT_TOKEN)
+            print(f"✅ Webhook set to: {WEBHOOK_URL}")
+        except Exception as e:
+            print(f"⚠️ Webhook error: {e}")
+            print("ℹ️ Bot will still work with polling")
+    else:
+        print("⚠️ WEBHOOK_URL not set, using polling")
     
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
