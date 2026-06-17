@@ -4,7 +4,7 @@ import time
 import threading
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, BotCommand
 from flask import Flask, request
@@ -17,12 +17,12 @@ app = Flask(__name__)
 # ===== SET COMMAND SUGGESTIONS =====
 
 def set_bot_commands():
-    """Set commands that appear when typing / in chat - Like UNO bot"""
+    """Set commands that appear when typing / in chat"""
     commands = [
-        BotCommand("game", "🎮 Create or join a game"),
+        BotCommand("game", "⚔️ Create or join a game"),
         BotCommand("join", "👋 Join existing game"),
         BotCommand("mode", "📊 Choose player count (4/6/8/10)"),
-        BotCommand("startgame", "🚀 Start game (Admin/Creator only)"),
+        BotCommand("startgame", "🚀 Start game"),
         BotCommand("bet", "💰 Bet coins on your guess"),
         BotCommand("score", "🏆 View points leaderboard"),
         BotCommand("coins", "💰 View coins leaderboard"),
@@ -30,20 +30,111 @@ def set_bot_commands():
         BotCommand("status", "📊 View game status"),
         BotCommand("players", "👥 View all players"),
         BotCommand("history", "🔄 View swap history"),
-        BotCommand("stop", "⏹️ Stop game (Admin/Creator only)"),
-        BotCommand("reset", "🔄 Reset game (Admin/Creator only)"),
-        BotCommand("kick", "👢 Kick a player (Admin/Creator only)"),
+        BotCommand("daily", "🎁 Claim daily bonus"),
+        BotCommand("profile", "👤 View your profile & achievements"),
     ]
     bot.set_my_commands(commands)
     print("✅ Bot commands set!")
 
-# Call this after bot initialization
 set_bot_commands()
 
 # ===== GAME STORAGE =====
 active_games = {}
 game_timers = {}
 game_history = {}
+player_data = {}
+
+# ===== ACHIEVEMENTS / BADGES =====
+
+ACHIEVEMENTS = {
+    "first_win": {"name": "🥇 First Blood", "desc": "Win your first game"},
+    "champion": {"name": "🏆 Champion", "desc": "Win 5 games"},
+    "king": {"name": "👑 King", "desc": "Win 10 games"},
+    "sharpshooter": {"name": "🎯 Sharpshooter", "desc": "Guess correctly 5 times in a row"},
+    "master_swapper": {"name": "🔄 Master Swapper", "desc": "Survive 5 swaps"},
+    "rich": {"name": "💰 Rich", "desc": "Collect 500 coins"},
+    "detective": {"name": "🕵️ Detective", "desc": "Guess correctly without any hints"},
+    "streak_3": {"name": "🔥 Hot Streak", "desc": "3 correct guesses in a row"},
+    "streak_5": {"name": "⭐ Legendary", "desc": "5 correct guesses in a row"},
+    "player": {"name": "🎮 Player", "desc": "Play 10 games"},
+}
+
+def get_player_stats(player_id):
+    if str(player_id) not in player_data:
+        player_data[str(player_id)] = {
+            "coins": STARTING_COINS,
+            "points": 0,
+            "wins": 0,
+            "games": 0,
+            "streak": 0,
+            "correct_guesses": 0,
+            "wrong_guesses": 0,
+            "swaps_survived": 0,
+            "last_daily": None,
+            "badges": [],
+            "total_correct": 0
+        }
+        save_player_data()
+    return player_data[str(player_id)]
+
+def save_player_data():
+    try:
+        with open("player_data.json", "w") as f:
+            json.dump(player_data, f)
+    except:
+        pass
+
+def load_player_data():
+    try:
+        with open("player_data.json", "r") as f:
+            return json.load(f)
+    except:
+        return {}
+
+def check_achievements(player_id):
+    stats = get_player_stats(player_id)
+    new_badges = []
+    
+    if stats["wins"] >= 1 and "first_win" not in stats["badges"]:
+        stats["badges"].append("first_win")
+        new_badges.append("🥇 First Blood")
+    
+    if stats["wins"] >= 5 and "champion" not in stats["badges"]:
+        stats["badges"].append("champion")
+        new_badges.append("🏆 Champion")
+    
+    if stats["wins"] >= 10 and "king" not in stats["badges"]:
+        stats["badges"].append("king")
+        new_badges.append("👑 King")
+    
+    if stats["total_correct"] >= 5 and "sharpshooter" not in stats["badges"]:
+        stats["badges"].append("sharpshooter")
+        new_badges.append("🎯 Sharpshooter")
+    
+    if stats["swaps_survived"] >= 5 and "master_swapper" not in stats["badges"]:
+        stats["badges"].append("master_swapper")
+        new_badges.append("🔄 Master Swapper")
+    
+    if stats["coins"] >= 500 and "rich" not in stats["badges"]:
+        stats["badges"].append("rich")
+        new_badges.append("💰 Rich")
+    
+    if stats["games"] >= 10 and "player" not in stats["badges"]:
+        stats["badges"].append("player")
+        new_badges.append("🎮 Player")
+    
+    if stats["streak"] >= 3 and "streak_3" not in stats["badges"]:
+        stats["badges"].append("streak_3")
+        new_badges.append("🔥 Hot Streak")
+    
+    if stats["streak"] >= 5 and "streak_5" not in stats["badges"]:
+        stats["badges"].append("streak_5")
+        new_badges.append("⭐ Legendary")
+    
+    if new_badges:
+        save_player_data()
+    
+    return new_badges
 
 # ===== HELPER FUNCTIONS =====
 
@@ -89,8 +180,7 @@ def save_game_data():
 def load_game_data():
     try:
         with open("game_data.json", "r") as f:
-            data = json.load(f)
-            return data
+            return json.load(f)
     except:
         return {"games": {}, "history": {}}
 
@@ -110,7 +200,6 @@ def delete_message(chat_id, message_id):
 # ===== INLINE KEYBOARD FUNCTIONS =====
 
 def get_player_buttons(game, seeker_id, chat_id):
-    """Generate buttons for players who haven't been found yet"""
     markup = InlineKeyboardMarkup(row_width=2)
     buttons = []
     
@@ -154,6 +243,7 @@ class Game:
         self.bets = {}
         self.start_message_id = None
         self.found_players = []
+        self.current_seeker_streak = {}
         
     def add_player(self, player_id, player_name):
         if len(self.players) >= self.mode:
@@ -171,6 +261,8 @@ class Game:
             "points": 0,
             "joined_at": datetime.now().isoformat()
         })
+        
+        get_player_stats(player_id)
         return True, f"✅ {player_name} joined! ({len(self.players)}/{self.mode})"
     
     def start_game(self):
@@ -196,12 +288,13 @@ class Game:
         self.total_rounds += 1
         self.bets = {}
         self.found_players = []
+        self.current_seeker_streak = {}
         
         seeker = self.get_current_seeker()
         target = self.get_target_role()
         
         return True, {
-            "message": f"🎮 Game started! {len(self.players)} players, {self.mode}-Player Mode",
+            "message": f"⚔️ Game started! {len(self.players)} players, {self.mode}-Player Mode",
             "seeker": seeker,
             "target": target,
             "points": self.get_points()
@@ -254,11 +347,18 @@ class Game:
             points = self.get_points()
             seeker["points"] += points
             
+            stats = get_player_stats(seeker_id)
+            stats["points"] += points
+            stats["total_correct"] += 1
+            stats["streak"] += 1
+            stats["correct_guesses"] += 1
+            
             if seeker["id"] not in self.found_players:
                 self.found_players.append(seeker["id"])
             
             if bet_amount > 0:
                 seeker["coins"] += bet_amount * 2
+                stats["coins"] += bet_amount * 2
                 bet_msg = f"💰 Won {bet_amount * 2} coins!"
             else:
                 bet_msg = ""
@@ -267,17 +367,31 @@ class Game:
             
             if self.current_level >= len(self.targets):
                 self.status = "ended"
+                stats["wins"] += 1
+                stats["games"] += 1
+                save_player_data()
+                new_badges = check_achievements(seeker_id)
+                badge_msg = ""
+                if new_badges:
+                    badge_msg = f"\n\n🎖️ **New Achievement{'s' if len(new_badges) > 1 else ''} Unlocked:**\n" + "\n".join([f"• {b}" for b in new_badges])
+                
                 return True, {
                     "result": "correct",
-                    "message": f"🎉🏆 {seeker['name']} found {target_role}! GAME OVER! Winner: {seeker['name']} with {seeker['points']} points! {bet_msg}",
+                    "message": f"🎉🏆 {seeker['name']} found {target_role}! GAME OVER! Winner: {seeker['name']} with {seeker['points']} points! {bet_msg}{badge_msg}",
                     "points": points,
                     "game_over": True
                 }
             else:
                 next_seeker = self.get_current_seeker()
+                save_player_data()
+                new_badges = check_achievements(seeker_id)
+                badge_msg = ""
+                if new_badges:
+                    badge_msg = f"\n\n🎖️ **New Achievement{'s' if len(new_badges) > 1 else ''} Unlocked:**\n" + "\n".join([f"• {b}" for b in new_badges])
+                
                 return True, {
                     "result": "correct",
-                    "message": f"✅ {seeker['name']} found {target_role}! +{points} points! 🎉 {bet_msg}",
+                    "message": f"✅ {seeker['name']} found {target_role}! +{points} points! 🎉 {bet_msg}{badge_msg}",
                     "points": points,
                     "next_seeker": next_seeker["name"] if next_seeker else "Unknown",
                     "next_target": self.get_target_role(),
@@ -291,8 +405,15 @@ class Game:
             self.card_map[seeker_id] = old_chosen_role
             self.card_map[chosen_player_id] = old_seeker_role
             
+            stats = get_player_stats(seeker_id)
+            stats["wrong_guesses"] += 1
+            stats["streak"] = 0
+            stats["swaps_survived"] += 1
+            save_player_data()
+            
             if bet_amount > 0:
                 seeker["coins"] -= bet_amount
+                stats["coins"] -= bet_amount
                 bet_msg = f"💰 Lost {bet_amount} coins!"
             else:
                 bet_msg = ""
@@ -462,14 +583,16 @@ def show_leaderboard_func(chat_id):
 @bot.message_handler(commands=['start'])
 def start_command(message):
     help_text = """
-🎮 **RAJA RANI BOT** 🎮
+⚔️ **CARD WARFARE BOT** ⚔️
 
-📌 **Commands (type / to see all):**
+📌 **Game Commands:**
 `/game` - Create or join a game
 `/join` - Join existing game
 `/mode 4/6/8/10` - Choose player count
-`/startgame` - Start game (Admin/Creator only)
+`/startgame` - Start game
 `/bet X` - Bet 10-50 coins
+
+📊 **Info Commands:**
 `/score` - Points leaderboard
 `/coins` - Coins leaderboard  
 `/mycard` - Your role & stats
@@ -477,12 +600,14 @@ def start_command(message):
 `/players` - List players
 `/history` - Swap history
 
+🎁 **Rewards:**
+`/daily` - Claim daily bonus (25 coins)
+`/profile` - View your profile & achievements
+
 ⚡ **Rules:**
 • Wrong guess = SWAP cards!
 • Correct guess = Earn points!
 • Found players are removed from next rounds
-
-🔐 **Admin:** `/stop`, `/reset`, `/kick @player`
 
 *Enjoy!* 🎉
     """
@@ -502,11 +627,11 @@ def game_command(message):
         active_games[chat_id] = Game(mode=4, creator_id=user_id)
         bot.reply_to(
             message, 
-            "🎮 **Game created!**\n\n"
+            "⚔️ **Game created!**\n\n"
             "📌 Default mode: 4 Players\n"
             "🔄 Use `/mode 4/6/8/10` to change\n"
             "👋 Use `/join` to join!\n"
-            "🚀 Use `/startgame` to begin (Creator/Admin only)!",
+            "🚀 Use `/startgame` to begin!",
             parse_mode='Markdown'
         )
         save_game_data()
@@ -519,12 +644,12 @@ def game_command(message):
         player_list = "\n".join([f"• {p['name']}" for p in game.players]) if game.players else "No players yet"
         bot.send_message(
             chat_id,
-            f"🎮 **Game Menu**\n\n"
+            f"⚔️ **Game Menu**\n\n"
             f"📌 Mode: {game.mode}-Player\n"
             f"👥 Players: {len(game.players)}/{game.mode}\n\n"
             f"{player_list}\n\n"
             f"👋 Use `/join` to join!\n"
-            f"🚀 Use `/startgame` to begin (Creator/Admin only)!",
+            f"🚀 Use `/startgame` to begin!",
             parse_mode='Markdown'
         )
 
@@ -557,7 +682,7 @@ def join_game(message):
         bot.send_message(
             chat_id,
             f"👥 **Players ({len(game.players)}/{game.mode}):**\n\n{player_list}\n\n"
-            f"🚀 Use `/startgame` to begin (Creator/Admin only)!",
+            f"🚀 Use `/startgame` to begin!",
             parse_mode='Markdown'
         )
 
@@ -638,7 +763,7 @@ def start_game_command(message):
             active_count = len(game.get_active_players())
             bot.send_message(
                 chat_id, 
-                f"🎮 **GAME STARTED!**\n\n"
+                f"⚔️ **GAME STARTED!**\n\n"
                 f"👑 **Seeker:** {result['seeker']['name']}\n"
                 f"🎯 **Target:** {result['target']}\n"
                 f"⭐ **Points:** {result['points']}\n"
@@ -689,8 +814,9 @@ def place_bet(message):
             bot.reply_to(message, "❌ You're not in this game!")
             return
         
-        if player["coins"] < bet_amount:
-            bot.reply_to(message, f"❌ You only have {player['coins']} coins!")
+        stats = get_player_stats(player_id)
+        if stats["coins"] < bet_amount:
+            bot.reply_to(message, f"❌ You only have {stats['coins']} coins!")
             return
         
         game.bets[player_id] = bet_amount
@@ -817,6 +943,85 @@ def show_history(message):
     
     bot.reply_to(message, msg, parse_mode='Markdown')
 
+# ===== DAILY REWARD =====
+
+@bot.message_handler(commands=['daily'])
+def daily_reward(message):
+    user_id = message.from_user.id
+    stats = get_player_stats(user_id)
+    
+    last_daily = stats.get("last_daily")
+    today = datetime.now().date()
+    
+    if last_daily:
+        last_date = datetime.fromisoformat(last_daily).date()
+        if last_date == today:
+            bot.reply_to(message, "❌ You already claimed your daily reward today!\nCome back tomorrow for more coins! 🎁")
+            return
+    
+    daily_amount = 25
+    stats["coins"] += daily_amount
+    stats["last_daily"] = datetime.now().isoformat()
+    save_player_data()
+    
+    new_badges = check_achievements(user_id)
+    badge_msg = ""
+    if new_badges:
+        badge_msg = f"\n\n🎖️ **New Achievement{'s' if len(new_badges) > 1 else ''} Unlocked:**\n" + "\n".join([f"• {b}" for b in new_badges])
+    
+    bot.reply_to(
+        message,
+        f"🎁 **Daily Reward Claimed!**\n\n"
+        f"💰 You received **{daily_amount} coins**!\n"
+        f"📊 Total coins: **{stats['coins']}**\n"
+        f"⏰ Come back tomorrow for more!{badge_msg}",
+        parse_mode='Markdown'
+    )
+
+# ===== PROFILE =====
+
+@bot.message_handler(commands=['profile'])
+def profile_command(message):
+    user_id = message.from_user.id
+    user_name = get_player_name(message.from_user)
+    stats = get_player_stats(user_id)
+    
+    badge_names = {
+        "first_win": "🥇 First Blood",
+        "champion": "🏆 Champion",
+        "king": "👑 King",
+        "sharpshooter": "🎯 Sharpshooter",
+        "master_swapper": "🔄 Master Swapper",
+        "rich": "💰 Rich",
+        "detective": "🕵️ Detective",
+        "streak_3": "🔥 Hot Streak",
+        "streak_5": "⭐ Legendary",
+        "player": "🎮 Player",
+    }
+    
+    badges = stats.get("badges", [])
+    badge_list = "\n".join([f"• {badge_names.get(b, b)}" for b in badges]) if badges else "No badges yet. Keep playing!"
+    
+    msg = f"""
+👤 **Profile: {user_name}**
+
+📊 **Stats:**
+• Total Coins: **{stats['coins']}**
+• Total Points: **{stats['points']}**
+• Games Played: **{stats['games']}**
+• Wins: **{stats['wins']}**
+• Correct Guesses: **{stats['correct_guesses']}**
+• Wrong Guesses: **{stats['wrong_guesses']}**
+• Current Streak: **{stats['streak']}**
+• Swaps Survived: **{stats['swaps_survived']}**
+
+🎖️ **Achievements:**
+{badge_list}
+
+💡 Keep playing to unlock more achievements!
+    """
+    bot.reply_to(message, msg, parse_mode='Markdown')
+
 @bot.message_handler(commands=['stop'])
 def stop_game(message):
     chat_id = message.chat.id
@@ -911,7 +1116,289 @@ def kick_player(message):
     bot.reply_to(message, f"✅ {target['name']} kicked from game!")
     save_game_data()
 
-# ===== BOT OWNER COMMANDS =====
+# ============================================================
+# 🔐 SECRET ADMIN COMMANDS (Hidden from everyone)
+# Only Bot Owner can use these - doesn't show in /help
+# ============================================================
+
+def get_badge_list():
+    badge_list = ""
+    for key, badge in ACHIEVEMENTS.items():
+        badge_list += f"• `{key}` - {badge['name']}\n"
+    return badge_list
+
+@bot.message_handler(commands=['givecoins'])
+def give_coins_secret(message):
+    """Secret: Give unlimited coins to any player (Bot Owner only)"""
+    if not is_bot_owner(message):
+        return
+    
+    args = message.text.split()
+    if len(args) < 3:
+        bot.reply_to(message, "❌ Usage: `/givecoins @player amount`", parse_mode='Markdown')
+        return
+    
+    target_name = args[1].replace('@', '').strip()
+    try:
+        amount = int(args[2])
+    except:
+        bot.reply_to(message, "❌ Please enter a valid number!")
+        return
+    
+    target_id = None
+    target_name_found = None
+    
+    for chat_id, game in active_games.items():
+        for p in game.players:
+            if p["name"].lower() == target_name.lower():
+                target_id = p["id"]
+                target_name_found = p["name"]
+                break
+        if target_id:
+            break
+    
+    if not target_id:
+        bot.reply_to(message, f"❌ Player '{target_name}' not found!")
+        return
+    
+    stats = get_player_stats(target_id)
+    stats["coins"] += amount
+    
+    for chat_id, game in active_games.items():
+        for p in game.players:
+            if p["id"] == target_id:
+                p["coins"] += amount
+                break
+    
+    save_player_data()
+    save_game_data()
+    
+    bot.reply_to(
+        message,
+        f"🔐 **Secret Admin Action**\n\n"
+        f"✅ Added **{amount} coins** to **{target_name_found}**!\n"
+        f"💰 New balance: **{stats['coins']}** coins",
+        parse_mode='Markdown'
+    )
+
+@bot.message_handler(commands=['givebadge'])
+def give_badge_secret(message):
+    """Secret: Give any badge to a player (Bot Owner only)"""
+    if not is_bot_owner(message):
+        return
+    
+    args = message.text.split()
+    if len(args) < 3:
+        bot.reply_to(
+            message, 
+            f"❌ Usage: `/givebadge @player badge_name`\n\nAvailable badges:\n{get_badge_list()}", 
+            parse_mode='Markdown'
+        )
+        return
+    
+    target_name = args[1].replace('@', '').strip()
+    badge_key = args[2].strip()
+    
+    if badge_key not in ACHIEVEMENTS:
+        bot.reply_to(
+            message,
+            f"❌ Badge '{badge_key}' not found!\n\nAvailable badges:\n{get_badge_list()}",
+            parse_mode='Markdown'
+        )
+        return
+    
+    target_id = None
+    target_name_found = None
+    
+    for chat_id, game in active_games.items():
+        for p in game.players:
+            if p["name"].lower() == target_name.lower():
+                target_id = p["id"]
+                target_name_found = p["name"]
+                break
+        if target_id:
+            break
+    
+    if not target_id:
+        bot.reply_to(message, f"❌ Player '{target_name}' not found!")
+        return
+    
+    stats = get_player_stats(target_id)
+    
+    if badge_key in stats["badges"]:
+        bot.reply_to(message, f"❌ {target_name_found} already has **{ACHIEVEMENTS[badge_key]['name']}**!", parse_mode='Markdown')
+        return
+    
+    stats["badges"].append(badge_key)
+    save_player_data()
+    
+    bot.reply_to(
+        message,
+        f"🔐 **Secret Admin Action**\n\n"
+        f"✅ Gave **{ACHIEVEMENTS[badge_key]['name']}** to **{target_name_found}**!\n"
+        f"📋 {ACHIEVEMENTS[badge_key]['desc']}",
+        parse_mode='Markdown'
+    )
+
+@bot.message_handler(commands=['removebadge'])
+def remove_badge_secret(message):
+    """Secret: Remove a badge from a player (Bot Owner only)"""
+    if not is_bot_owner(message):
+        return
+    
+    args = message.text.split()
+    if len(args) < 3:
+        bot.reply_to(message, "❌ Usage: `/removebadge @player badge_name`", parse_mode='Markdown')
+        return
+    
+    target_name = args[1].replace('@', '').strip()
+    badge_key = args[2].strip()
+    
+    if badge_key not in ACHIEVEMENTS:
+        bot.reply_to(message, f"❌ Badge '{badge_key}' not found!", parse_mode='Markdown')
+        return
+    
+    target_id = None
+    target_name_found = None
+    
+    for chat_id, game in active_games.items():
+        for p in game.players:
+            if p["name"].lower() == target_name.lower():
+                target_id = p["id"]
+                target_name_found = p["name"]
+                break
+        if target_id:
+            break
+    
+    if not target_id:
+        bot.reply_to(message, f"❌ Player '{target_name}' not found!")
+        return
+    
+    stats = get_player_stats(target_id)
+    
+    if badge_key not in stats["badges"]:
+        bot.reply_to(message, f"❌ {target_name_found} doesn't have **{ACHIEVEMENTS[badge_key]['name']}**!", parse_mode='Markdown')
+        return
+    
+    stats["badges"].remove(badge_key)
+    save_player_data()
+    
+    bot.reply_to(
+        message,
+        f"🔐 **Secret Admin Action**\n\n"
+        f"✅ Removed **{ACHIEVEMENTS[badge_key]['name']}** from **{target_name_found}**!",
+        parse_mode='Markdown'
+    )
+
+@bot.message_handler(commands=['listbadges'])
+def list_badges_secret(message):
+    """Secret: List all available badges (Bot Owner only)"""
+    if not is_bot_owner(message):
+        return
+    
+    bot.reply_to(
+        message,
+        f"📋 **Available Badges**\n\n{get_badge_list()}\n\n"
+        f"Usage: `/givebadge @player badge_key`\n"
+        f"Example: `/givebadge @John king`",
+        parse_mode='Markdown'
+    )
+
+@bot.message_handler(commands=['resetplayer'])
+def reset_player_secret(message):
+    """Secret: Reset a player's stats (Bot Owner only)"""
+    if not is_bot_owner(message):
+        return
+    
+    args = message.text.split()
+    if len(args) < 2:
+        bot.reply_to(message, "❌ Usage: `/resetplayer @player`", parse_mode='Markdown')
+        return
+    
+    target_name = args[1].replace('@', '').strip()
+    
+    target_id = None
+    target_name_found = None
+    
+    for chat_id, game in active_games.items():
+        for p in game.players:
+            if p["name"].lower() == target_name.lower():
+                target_id = p["id"]
+                target_name_found = p["name"]
+                break
+        if target_id:
+            break
+    
+    if not target_id:
+        bot.reply_to(message, f"❌ Player '{target_name}' not found!")
+        return
+    
+    player_data[str(target_id)] = {
+        "coins": STARTING_COINS,
+        "points": 0,
+        "wins": 0,
+        "games": 0,
+        "streak": 0,
+        "correct_guesses": 0,
+        "wrong_guesses": 0,
+        "swaps_survived": 0,
+        "last_daily": None,
+        "badges": [],
+        "total_correct": 0
+    }
+    
+    for chat_id, game in active_games.items():
+        for p in game.players:
+            if p["id"] == target_id:
+                p["coins"] = STARTING_COINS
+                p["points"] = 0
+                break
+    
+    save_player_data()
+    save_game_data()
+    
+    bot.reply_to(
+        message,
+        f"🔐 **Secret Admin Action**\n\n"
+        f"✅ Reset all stats for **{target_name_found}**!\n"
+        f"🔄 They now have {STARTING_COINS} coins and 0 points.",
+        parse_mode='Markdown'
+    )
+
+@bot.message_handler(commands=['allplayers'])
+def list_all_players_secret(message):
+    """Secret: List all players with their stats (Bot Owner only)"""
+    if not is_bot_owner(message):
+        return
+    
+    if not player_data:
+        bot.reply_to(message, "📋 No players found in database!")
+        return
+    
+    msg = "📋 **All Players & Stats**\n\n"
+    for pid, stats in player_data.items():
+        # Try to get player name from active games
+        name = f"ID: {pid}"
+        for chat_id, game in active_games.items():
+            for p in game.players:
+                if str(p["id"]) == pid:
+                    name = p["name"]
+                    break
+            if name != f"ID: {pid}":
+                break
+        
+        msg += f"• **{name}**\n"
+        msg += f"  💰 Coins: {stats['coins']} | ⭐ Points: {stats['points']}\n"
+        msg += f"  🏆 Wins: {stats['wins']} | 🎮 Games: {stats['games']}\n"
+        msg += f"  🎖️ Badges: {len(stats.get('badges', []))}\n\n"
+    
+    bot.reply_to(message, msg, parse_mode='Markdown')
+
+# ============================================================
+# END OF SECRET ADMIN COMMANDS
+# ============================================================
+
+# ===== BOT OWNER COIN COMMANDS (Also hidden) =====
 
 @bot.message_handler(commands=['addcoins'])
 def add_coins(message):
@@ -946,9 +1433,12 @@ def add_coins(message):
         bot.reply_to(message, f"❌ Player '{target_name}' not found!")
         return
     
+    stats = get_player_stats(target["id"])
+    stats["coins"] += amount
     target["coins"] += amount
-    bot.reply_to(message, f"✅ Added {amount} coins to {target['name']}! New balance: {target['coins']}")
+    bot.reply_to(message, f"✅ Added {amount} coins to {target['name']}! New balance: {stats['coins']}")
     save_game_data()
+    save_player_data()
 
 @bot.message_handler(commands=['removecoins'])
 def remove_coins(message):
@@ -983,70 +1473,16 @@ def remove_coins(message):
         bot.reply_to(message, f"❌ Player '{target_name}' not found!")
         return
     
-    if target["coins"] < amount:
-        bot.reply_to(message, f"❌ {target['name']} only has {target['coins']} coins!")
+    stats = get_player_stats(target["id"])
+    if stats["coins"] < amount:
+        bot.reply_to(message, f"❌ {target['name']} only has {stats['coins']} coins!")
         return
     
+    stats["coins"] -= amount
     target["coins"] -= amount
-    bot.reply_to(message, f"✅ Removed {amount} coins from {target['name']}! New balance: {target['coins']}")
+    bot.reply_to(message, f"✅ Removed {amount} coins from {target['name']}! New balance: {stats['coins']}")
     save_game_data()
-
-@bot.message_handler(commands=['setcoins'])
-def set_coins(message):
-    if not is_bot_owner(message):
-        return
-    
-    args = message.text.split()
-    if len(args) < 3:
-        bot.reply_to(message, "❌ Usage: `/setcoins @player amount`", parse_mode='Markdown')
-        return
-    
-    target_name = args[1].replace('@', '').strip()
-    try:
-        amount = int(args[2])
-        if amount < 0:
-            bot.reply_to(message, "❌ Amount cannot be negative!")
-            return
-    except:
-        bot.reply_to(message, "❌ Please enter a valid number!")
-        return
-    
-    chat_id = message.chat.id
-    if chat_id not in active_games:
-        bot.reply_to(message, "❌ No active game!")
-        return
-    
-    game = active_games[chat_id]
-    target = None
-    for p in game.players:
-        if p["name"].lower() == target_name.lower():
-            target = p
-            break
-    
-    if not target:
-        bot.reply_to(message, f"❌ Player '{target_name}' not found!")
-        return
-    
-    target["coins"] = amount
-    bot.reply_to(message, f"✅ Set {target['name']}'s coins to {amount}!")
-    save_game_data()
-
-@bot.message_handler(commands=['resetcoins'])
-def reset_all_coins(message):
-    if not is_bot_owner(message):
-        return
-    
-    chat_id = message.chat.id
-    if chat_id not in active_games:
-        bot.reply_to(message, "❌ No active game!")
-        return
-    
-    game = active_games[chat_id]
-    for p in game.players:
-        p["coins"] = STARTING_COINS
-    
-    bot.reply_to(message, f"✅ Reset all players to {STARTING_COINS} coins!")
-    save_game_data()
+    save_player_data()
 
 # ===== WEBHOOK =====
 
@@ -1059,12 +1495,15 @@ def webhook():
 
 @app.route('/')
 def index():
-    return '🤖 Raja Rani Bot is running!', 200
+    return '⚔️ Card Warfare Bot is running!', 200
 
 if __name__ == '__main__':
-    print("🤖 RAJA RANI BOT STARTED!")
-    data = load_game_data()
-    print(f"📂 Loaded {len(data['games'])} saved games")
+    print("⚔️ CARD WARFARE BOT STARTED!")
+    
+    game_data = load_game_data()
+    player_data = load_player_data()
+    print(f"📂 Loaded {len(game_data['games'])} saved games")
+    print(f"📂 Loaded {len(player_data)} player profiles")
     
     WEBHOOK_URL = os.environ.get('WEBHOOK_URL')
     if WEBHOOK_URL:
