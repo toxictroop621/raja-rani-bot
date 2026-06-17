@@ -1,45 +1,84 @@
 # ============================================
-# DATABASE.PY - All database operations
+# DATABASE.PY - MongoDB Connection (Permanent)
 # ============================================
 
-import json
 import os
 from datetime import datetime
+import pymongo
+from pymongo import MongoClient
 
-# ===== FILE PATHS =====
-DATA_DIR = "data"
-GAME_DATA_FILE = os.path.join(DATA_DIR, "game_data.json")
-PLAYER_DATA_FILE = os.path.join(DATA_DIR, "player_data.json")
-USER_DATABASE_FILE = os.path.join(DATA_DIR, "user_database.json")
+# ===== MONGODB CONNECTION =====
 
-# Ensure data directory exists
-if not os.path.exists(DATA_DIR):
-    os.makedirs(DATA_DIR)
+def get_db():
+    """Get MongoDB database connection"""
+    MONGO_URI = os.environ.get('MONGO_URI')
+    if not MONGO_URI:
+        raise Exception("MONGO_URI environment variable not set!")
+    
+    client = MongoClient(MONGO_URI)
+    db = client.get_database("card_warfare_bot")
+    return db
+
+def init_collections():
+    """Initialize collections if they don't exist"""
+    db = get_db()
+    
+    # Collections
+    if "users" not in db.list_collection_names():
+        db.create_collection("users")
+    
+    if "players" not in db.list_collection_names():
+        db.create_collection("players")
+    
+    if "games" not in db.list_collection_names():
+        db.create_collection("games")
+    
+    # Create indexes
+    db.users.create_index("user_id", unique=True)
+    db.players.create_index("player_id", unique=True)
+    db.games.create_index("chat_id")
+    
+    return db
 
 # ============================================
-# USER DATABASE - Stores ALL users who interact
+# USER DATABASE FUNCTIONS
 # ============================================
 
 def load_user_database():
-    """Load user database from file"""
-    try:
-        with open(USER_DATABASE_FILE, "r") as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
+    """Load all users from MongoDB"""
+    db = get_db()
+    users = db.users.find()
+    result = {}
+    for user in users:
+        result[str(user["user_id"])] = {
+            "id": user["user_id"],
+            "username": user.get("username", ""),
+            "first_name": user.get("first_name", ""),
+            "last_name": user.get("last_name", ""),
+            "registered_at": user.get("registered_at"),
+            "last_active": user.get("last_active")
+        }
+    return result
 
 def save_user_database(user_db):
-    """Save user database to file"""
-    try:
-        with open(USER_DATABASE_FILE, "w") as f:
-            json.dump(user_db, f, indent=2)
-    except:
-        pass
+    """Save all users to MongoDB"""
+    db = get_db()
+    db.users.delete_many({})
+    
+    for uid, data in user_db.items():
+        doc = {
+            "user_id": int(uid),
+            "username": data.get("username", ""),
+            "first_name": data.get("first_name", ""),
+            "last_name": data.get("last_name", ""),
+            "registered_at": data.get("registered_at"),
+            "last_active": data.get("last_active")
+        }
+        db.users.insert_one(doc)
 
 def register_user(user_id, username, first_name, last_name="", user_db=None):
     """Register a user in the database"""
-    if user_db is None:
-        user_db = load_user_database()
+    user_db = load_user_database() if user_db is None else user_db
     
     user_id_str = str(user_id)
     
@@ -55,7 +94,6 @@ def register_user(user_id, username, first_name, last_name="", user_db=None):
         save_user_database(user_db)
         return True, user_db
     else:
-        # Update last active and username
         user_db[user_id_str]["last_active"] = datetime.now().isoformat()
         if username:
             user_db[user_id_str]["username"] = username
@@ -63,36 +101,24 @@ def register_user(user_id, username, first_name, last_name="", user_db=None):
         return False, user_db
 
 def find_user_by_name_or_username(search_term, user_db):
-    """
-    Find a user by:
-    - @username
-    - first_name
-    - last_name
-    - full name
-    - partial match
-    """
     search_term = search_term.replace('@', '').strip().lower()
     
     if not user_db:
         return None, None
     
-    # 1. Search by username (exact match)
     for uid, data in user_db.items():
         if data.get("username", "").lower() == search_term:
             return int(uid), data.get("username") or data.get("first_name", "User")
     
-    # 2. Search by first_name (exact match)
     for uid, data in user_db.items():
         if data.get("first_name", "").lower() == search_term:
             return int(uid), data.get("username") or data.get("first_name", "User")
     
-    # 3. Search by full name (first + last)
     for uid, data in user_db.items():
         full_name = f"{data.get('first_name', '')} {data.get('last_name', '')}".strip().lower()
         if full_name == search_term:
             return int(uid), data.get("username") or data.get("first_name", "User")
     
-    # 4. Partial match (for group mentions without @)
     for uid, data in user_db.items():
         first_name = data.get("first_name", "").lower()
         username = data.get("username", "").lower()
@@ -101,43 +127,63 @@ def find_user_by_name_or_username(search_term, user_db):
     
     return None, None
 
-def get_user_data(user_id, user_db):
-    """Get user data from database"""
-    user_id_str = str(user_id)
-    return user_db.get(user_id_str)
-
-def get_all_users(user_db):
-    """Get all users in database"""
-    return list(user_db.values())
-
-def get_user_count(user_db):
-    """Get total number of registered users"""
-    return len(user_db)
-
 # ============================================
-# PLAYER STATS - Game stats for players
+# PLAYER STATS FUNCTIONS
 # ============================================
 
 def load_player_data():
-    """Load player stats from file"""
-    try:
-        with open(PLAYER_DATA_FILE, "r") as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
+    """Load all player stats from MongoDB"""
+    db = get_db()
+    players = db.players.find()
+    result = {}
+    for player in players:
+        result[str(player["player_id"])] = {
+            "coins": player.get("coins", 100),
+            "points": player.get("points", 0),
+            "wins": player.get("wins", 0),
+            "games": player.get("games", 0),
+            "streak": player.get("streak", 0),
+            "correct_guesses": player.get("correct_guesses", 0),
+            "wrong_guesses": player.get("wrong_guesses", 0),
+            "swaps_survived": player.get("swaps_survived", 0),
+            "last_daily": player.get("last_daily"),
+            "badges": player.get("badges", []),
+            "total_correct": player.get("total_correct", 0),
+            "name": player.get("name")
+        }
+    return result
 
 def save_player_data(player_data):
-    """Save player stats to file"""
-    try:
-        with open(PLAYER_DATA_FILE, "w") as f:
-            json.dump(player_data, f, indent=2)
-    except:
-        pass
+    """Save all player stats to MongoDB"""
+    db = get_db()
+    db.players.delete_many({})
+    
+    for pid, stats in player_data.items():
+        doc = {
+            "player_id": int(pid),
+            "coins": stats.get("coins", 100),
+            "points": stats.get("points", 0),
+            "wins": stats.get("wins", 0),
+            "games": stats.get("games", 0),
+            "streak": stats.get("streak", 0),
+            "correct_guesses": stats.get("correct_guesses", 0),
+            "wrong_guesses": stats.get("wrong_guesses", 0),
+            "swaps_survived": stats.get("swaps_survived", 0),
+            "last_daily": stats.get("last_daily"),
+            "badges": stats.get("badges", []),
+            "total_correct": stats.get("total_correct", 0),
+            "name": stats.get("name")
+        }
+        db.players.insert_one(doc)
 
-def get_player_stats(player_id, player_data, STARTING_COINS):
+def get_player_stats(player_id, STARTING_COINS):
     """Get or create player stats"""
-    if str(player_id) not in player_data:
-        player_data[str(player_id)] = {
+    db = get_db()
+    player = db.players.find_one({"player_id": player_id})
+    
+    if not player:
+        player = {
+            "player_id": player_id,
             "coins": STARTING_COINS,
             "points": 0,
             "wins": 0,
@@ -151,25 +197,74 @@ def get_player_stats(player_id, player_data, STARTING_COINS):
             "total_correct": 0,
             "name": None
         }
-        save_player_data(player_data)
-    return player_data[str(player_id)]
+        db.players.insert_one(player)
+    
+    return {
+        "coins": player.get("coins", STARTING_COINS),
+        "points": player.get("points", 0),
+        "wins": player.get("wins", 0),
+        "games": player.get("games", 0),
+        "streak": player.get("streak", 0),
+        "correct_guesses": player.get("correct_guesses", 0),
+        "wrong_guesses": player.get("wrong_guesses", 0),
+        "swaps_survived": player.get("swaps_survived", 0),
+        "last_daily": player.get("last_daily"),
+        "badges": player.get("badges", []),
+        "total_correct": player.get("total_correct", 0),
+        "name": player.get("name")
+    }
+
+def update_player_stats(player_id, updates):
+    """Update a player's stats"""
+    db = get_db()
+    db.players.update_one(
+        {"player_id": player_id},
+        {"$set": updates}
+    )
 
 # ============================================
-# GAME DATA - Active games
+# GAME DATA FUNCTIONS
 # ============================================
 
 def load_game_data():
-    """Load game data from file"""
-    try:
-        with open(GAME_DATA_FILE, "r") as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {"games": {}, "history": {}}
+    """Load game data from MongoDB"""
+    db = get_db()
+    games = db.games.find()
+    result = {"games": {}, "history": {}}
+    
+    for game in games:
+        chat_id = str(game["chat_id"])
+        result["games"][chat_id] = {
+            "mode": game.get("mode", 4),
+            "players": game.get("players", []),
+            "roles": game.get("roles", []),
+            "current_level": game.get("current_level", 0),
+            "status": game.get("status", "waiting"),
+            "card_map": game.get("card_map", {}),
+            "swap_history": game.get("swap_history", []),
+            "creator_id": game.get("creator_id"),
+            "found_players": game.get("found_players", [])
+        }
+    
+    return result
 
 def save_game_data(game_data):
-    """Save game data to file"""
-    try:
-        with open(GAME_DATA_FILE, "w") as f:
-            json.dump(game_data, f, indent=2)
-    except:
-        pass
+    """Save game data to MongoDB"""
+    db = get_db()
+    db.games.delete_many({})
+    
+    games = game_data.get("games", {})
+    for chat_id, game in games.items():
+        doc = {
+            "chat_id": int(chat_id),
+            "mode": game.get("mode", 4),
+            "players": game.get("players", []),
+            "roles": game.get("roles", []),
+            "current_level": game.get("current_level", 0),
+            "status": game.get("status", "waiting"),
+            "card_map": game.get("card_map", {}),
+            "swap_history": game.get("swap_history", []),
+            "creator_id": game.get("creator_id"),
+            "found_players": game.get("found_players", [])
+        }
+        db.games.insert_one(doc)
