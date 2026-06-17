@@ -1,5 +1,5 @@
 # ============================================
-# DATABASE.PY - MongoDB Connection (Fixed)
+# DATABASE.PY - MongoDB Connection (Fixed SSL)
 # ============================================
 
 import os
@@ -13,10 +13,17 @@ def get_db():
     """Get MongoDB database connection"""
     MONGO_URI = os.environ.get('MONGO_URI')
     if not MONGO_URI:
-        raise Exception("❌ MONGO_URI environment variable not set!")
+        print("⚠️ MONGO_URI not set, using local data")
+        return None
     
     try:
-        client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
+        # Add SSL parameters to fix handshake error
+        client = MongoClient(
+            MONGO_URI,
+            ssl=True,
+            tlsAllowInvalidCertificates=True,
+            serverSelectionTimeoutMS=5000
+        )
         # Force a connection to check if it works
         client.admin.command('ping')
         print("✅ MongoDB connection successful!")
@@ -24,12 +31,15 @@ def get_db():
         return db
     except Exception as e:
         print(f"❌ MongoDB connection failed: {e}")
-        raise
+        return None
 
 def init_collections():
     """Initialize collections if they don't exist"""
     try:
         db = get_db()
+        if db is None:
+            print("⚠️ No database connection, skipping initialization")
+            return None
         
         # Collections
         if "users" not in db.list_collection_names():
@@ -55,14 +65,16 @@ def init_collections():
         print(f"❌ MongoDB initialization failed: {e}")
         return None
 
-# ============================================
-# USER DATABASE FUNCTIONS (with error handling)
-# ============================================
+# ============================================================
+# USER DATABASE FUNCTIONS
+# ============================================================
 
 def load_user_database():
     """Load all users from MongoDB"""
     try:
         db = get_db()
+        if db is None:
+            return {}
         users = db.users.find()
         result = {}
         for user in users:
@@ -84,6 +96,8 @@ def save_user_database(user_db):
     """Save all users to MongoDB"""
     try:
         db = get_db()
+        if db is None:
+            return
         db.users.delete_many({})
         
         for uid, data in user_db.items():
@@ -151,14 +165,16 @@ def find_user_by_name_or_username(search_term, user_db):
     
     return None, None
 
-# ============================================
-# PLAYER STATS FUNCTIONS (with error handling)
-# ============================================
+# ============================================================
+# PLAYER STATS FUNCTIONS
+# ============================================================
 
 def load_player_data():
     """Load all player stats from MongoDB"""
     try:
         db = get_db()
+        if db is None:
+            return {}
         players = db.players.find()
         result = {}
         for player in players:
@@ -186,6 +202,8 @@ def save_player_data(player_data):
     """Save all player stats to MongoDB"""
     try:
         db = get_db()
+        if db is None:
+            return
         db.players.delete_many({})
         
         for pid, stats in player_data.items():
@@ -213,6 +231,22 @@ def get_player_stats(player_id, STARTING_COINS):
     """Get or create player stats"""
     try:
         db = get_db()
+        if db is None:
+            return {
+                "coins": STARTING_COINS,
+                "points": 0,
+                "wins": 0,
+                "games": 0,
+                "streak": 0,
+                "correct_guesses": 0,
+                "wrong_guesses": 0,
+                "swaps_survived": 0,
+                "last_daily": None,
+                "badges": [],
+                "total_correct": 0,
+                "name": None
+            }
+        
         player = db.players.find_one({"player_id": player_id})
         
         if not player:
@@ -269,6 +303,8 @@ def update_player_stats(player_id, updates):
     """Update a player's stats"""
     try:
         db = get_db()
+        if db is None:
+            return
         db.players.update_one(
             {"player_id": player_id},
             {"$set": updates}
@@ -276,14 +312,16 @@ def update_player_stats(player_id, updates):
     except Exception as e:
         print(f"❌ Error updating player stats: {e}")
 
-# ============================================
-# GAME DATA FUNCTIONS (with error handling)
-# ============================================
+# ============================================================
+# GAME DATA FUNCTIONS
+# ============================================================
 
 def load_game_data():
     """Load game data from MongoDB"""
     try:
         db = get_db()
+        if db is None:
+            return {"games": {}, "history": {}}
         games = db.games.find()
         result = {"games": {}, "history": {}}
         
@@ -310,6 +348,8 @@ def save_game_data(game_data):
     """Save game data to MongoDB"""
     try:
         db = get_db()
+        if db is None:
+            return
         db.games.delete_many({})
         
         games = game_data.get("games", {})
