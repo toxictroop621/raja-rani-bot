@@ -17,7 +17,6 @@ app = Flask(__name__)
 # ===== SET COMMAND SUGGESTIONS =====
 
 def set_bot_commands():
-    """Set commands that appear when typing / in chat"""
     commands = [
         BotCommand("game", "⚔️ Create or join a game"),
         BotCommand("join", "👋 Join existing game"),
@@ -43,6 +42,7 @@ active_games = {}
 game_timers = {}
 game_history = {}
 player_data = {}
+user_database = {}  # Stores ALL users who ever interacted
 
 # ===== ACHIEVEMENTS / BADGES =====
 
@@ -58,6 +58,78 @@ ACHIEVEMENTS = {
     "streak_5": {"name": "⭐ Legendary", "desc": "5 correct guesses in a row"},
     "player": {"name": "🎮 Player", "desc": "Play 10 games"},
 }
+
+# ============================================================
+# USER DATABASE FUNCTIONS (Built-in)
+# ============================================================
+
+def load_user_database():
+    try:
+        with open("user_database.json", "r") as f:
+            return json.load(f)
+    except:
+        return {}
+
+def save_user_database():
+    try:
+        with open("user_database.json", "w") as f:
+            json.dump(user_database, f, indent=2)
+    except:
+        pass
+
+def register_user(user_id, username, first_name, last_name=""):
+    global user_database
+    user_id_str = str(user_id)
+    
+    if user_id_str not in user_database:
+        user_database[user_id_str] = {
+            "id": user_id,
+            "username": username or "",
+            "first_name": first_name or "",
+            "last_name": last_name or "",
+            "registered_at": datetime.now().isoformat(),
+            "last_active": datetime.now().isoformat()
+        }
+        save_user_database()
+        return True
+    else:
+        user_database[user_id_str]["last_active"] = datetime.now().isoformat()
+        if username:
+            user_database[user_id_str]["username"] = username
+        save_user_database()
+        return False
+
+def find_user_by_name_or_username(search_term):
+    global user_database
+    search_term = search_term.replace('@', '').strip().lower()
+    
+    if not user_database:
+        return None, None
+    
+    for uid, data in user_database.items():
+        if data.get("username", "").lower() == search_term:
+            return int(uid), data.get("username") or data.get("first_name", "User")
+    
+    for uid, data in user_database.items():
+        if data.get("first_name", "").lower() == search_term:
+            return int(uid), data.get("username") or data.get("first_name", "User")
+    
+    for uid, data in user_database.items():
+        full_name = f"{data.get('first_name', '')} {data.get('last_name', '')}".strip().lower()
+        if full_name == search_term:
+            return int(uid), data.get("username") or data.get("first_name", "User")
+    
+    for uid, data in user_database.items():
+        first_name = data.get("first_name", "").lower()
+        username = data.get("username", "").lower()
+        if search_term in first_name or search_term in username:
+            return int(uid), data.get("username") or data.get("first_name", "User")
+    
+    return None, None
+
+# ============================================================
+# PLAYER STATS FUNCTIONS (Built-in)
+# ============================================================
 
 def get_player_stats(player_id):
     if str(player_id) not in player_data:
@@ -81,7 +153,7 @@ def get_player_stats(player_id):
 def save_player_data():
     try:
         with open("player_data.json", "w") as f:
-            json.dump(player_data, f)
+            json.dump(player_data, f, indent=2)
     except:
         pass
 
@@ -137,7 +209,40 @@ def check_achievements(player_id):
     
     return new_badges
 
-# ===== HELPER FUNCTIONS =====
+# ============================================================
+# GAME DATA FUNCTIONS (Built-in)
+# ============================================================
+
+def save_game_data():
+    try:
+        data = {"games": {}, "history": game_history}
+        for chat_id, game in active_games.items():
+            data["games"][str(chat_id)] = {
+                "mode": game.mode,
+                "players": game.players,
+                "roles": game.roles,
+                "current_level": game.current_level,
+                "status": game.status,
+                "card_map": game.card_map,
+                "swap_history": game.swap_history,
+                "creator_id": game.creator_id,
+                "found_players": game.found_players
+            }
+        with open("game_data.json", "w") as f:
+            json.dump(data, f, indent=2)
+    except:
+        pass
+
+def load_game_data():
+    try:
+        with open("game_data.json", "r") as f:
+            return json.load(f)
+    except:
+        return {"games": {}, "history": {}}
+
+# ============================================================
+# HELPER FUNCTIONS
+# ============================================================
 
 def is_admin_or_creator(message, game):
     if message.from_user.id == BOT_OWNER_ID:
@@ -158,33 +263,6 @@ def is_bot_owner(message):
 def get_player_name(user):
     return user.first_name or user.username or "Player"
 
-def save_game_data():
-    try:
-        data = {"games": {}, "history": game_history}
-        for chat_id, game in active_games.items():
-            data["games"][str(chat_id)] = {
-                "mode": game.mode,
-                "players": game.players,
-                "roles": game.roles,
-                "current_level": game.current_level,
-                "status": game.status,
-                "card_map": game.card_map,
-                "swap_history": game.swap_history,
-                "creator_id": game.creator_id,
-                "found_players": game.found_players
-            }
-        with open("game_data.json", "w") as f:
-            json.dump(data, f)
-    except:
-        pass
-
-def load_game_data():
-    try:
-        with open("game_data.json", "r") as f:
-            return json.load(f)
-    except:
-        return {"games": {}, "history": {}}
-
 def check_dm_access(player_id):
     try:
         bot.send_chat_action(player_id, 'typing')
@@ -198,13 +276,11 @@ def delete_message(chat_id, message_id):
     except:
         pass
 
-# ===== FIND PLAYER FUNCTION - WORKS EVERYWHERE =====
+# ============================================================
+# FIND PLAYER - Works with user_database
+# ============================================================
 
 def find_player_by_name(target_name):
-    """
-    Search for a player by name or @username
-    Works in: active games, saved data, ANY player who ever interacted
-    """
     target_name = target_name.replace('@', '').strip().lower()
     
     # 1. Search in active games
@@ -213,40 +289,22 @@ def find_player_by_name(target_name):
             if p["name"].lower() == target_name:
                 return p["id"], p["name"], True
     
-    # 2. Search in saved player data
+    # 2. Search in user_database
+    user_id, display_name = find_user_by_name_or_username(target_name)
+    if user_id:
+        return user_id, display_name, False
+    
+    # 3. Search in player_data
     for pid, stats in player_data.items():
-        # Check stored name
         stored_name = stats.get("name", "")
         if stored_name.lower() == target_name:
             return int(pid), stored_name, False
-        
-        # Check if we can find name from any active game
-        for chat_id, game in active_games.items():
-            for p in game.players:
-                if str(p["id"]) == pid:
-                    if p["name"].lower() == target_name:
-                        stats["name"] = p["name"]
-                        save_player_data()
-                        return p["id"], p["name"], False
-                    break
     
     return None, None, False
 
-def find_player_by_id(player_id):
-    """Get player name by ID"""
-    # Check active games
-    for chat_id, game in active_games.items():
-        for p in game.players:
-            if p["id"] == player_id:
-                return p["name"]
-    
-    # Check stored data
-    if str(player_id) in player_data:
-        return player_data[str(player_id)].get("name", f"Player_{player_id}")
-    
-    return None
-
-# ===== INLINE KEYBOARD FUNCTIONS =====
+# ============================================================
+# INLINE KEYBOARD FUNCTIONS
+# ============================================================
 
 def get_player_buttons(game, seeker_id, chat_id):
     markup = InlineKeyboardMarkup(row_width=2)
@@ -273,7 +331,9 @@ def get_player_buttons(game, seeker_id, chat_id):
     markup.add(*buttons)
     return markup
 
-# ===== GAME CLASS =====
+# ============================================================
+# GAME CLASS
+# ============================================================
 
 class Game:
     def __init__(self, mode=4, creator_id=None):
@@ -311,7 +371,6 @@ class Game:
             "joined_at": datetime.now().isoformat()
         })
         
-        # Update player data with name
         stats = get_player_stats(player_id)
         stats["name"] = player_name
         save_player_data()
@@ -513,7 +572,9 @@ class Game:
     def get_coin_leaderboard(self):
         return sorted(self.players, key=lambda x: x["coins"], reverse=True)
 
-# ===== CALLBACK HANDLERS =====
+# ============================================================
+# CALLBACK HANDLERS
+# ============================================================
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('guess_'))
 def handle_guess(call):
@@ -616,7 +677,9 @@ def handle_cancel(call):
         pass
     bot.answer_callback_query(call.id, "❌ Cancelled")
 
-# ===== SHOW LEADERBOARD FUNCTION =====
+# ============================================================
+# SHOW LEADERBOARD FUNCTION
+# ============================================================
 
 def show_leaderboard_func(chat_id):
     if chat_id not in active_games:
@@ -631,10 +694,16 @@ def show_leaderboard_func(chat_id):
         msg += f"{medal} {p['name']} - **{p['points']}** pts ({role})\n"
     bot.send_message(chat_id, msg, parse_mode='Markdown')
 
-# ===== BOT COMMANDS =====
+# ============================================================
+# BOT COMMANDS
+# ============================================================
 
 @bot.message_handler(commands=['start'])
 def start_command(message):
+    global user_database
+    user = message.from_user
+    register_user(user.id, user.username, user.first_name, user.last_name or "")
+    
     help_text = """
 ⚔️ **CARD WARFARE BOT** ⚔️
 
@@ -708,9 +777,13 @@ def game_command(message):
 
 @bot.message_handler(commands=['join'])
 def join_game(message):
+    global user_database
     chat_id = message.chat.id
     user_id = message.from_user.id
     user_name = get_player_name(message.from_user)
+    
+    user = message.from_user
+    register_user(user.id, user.username, user.first_name, user.last_name or "")
     
     if chat_id > 0:
         bot.reply_to(message, "❌ This command only works in groups!")
@@ -996,7 +1069,9 @@ def show_history(message):
     
     bot.reply_to(message, msg, parse_mode='Markdown')
 
-# ===== DAILY REWARD =====
+# ============================================================
+# DAILY REWARD
+# ============================================================
 
 @bot.message_handler(commands=['daily'])
 def daily_reward(message):
@@ -1031,7 +1106,9 @@ def daily_reward(message):
         parse_mode='Markdown'
     )
 
-# ===== PROFILE =====
+# ============================================================
+# PROFILE
+# ============================================================
 
 @bot.message_handler(commands=['profile'])
 def profile_command(message):
@@ -1074,6 +1151,10 @@ def profile_command(message):
 💡 Keep playing to unlock more achievements!
     """
     bot.reply_to(message, msg, parse_mode='Markdown')
+
+# ============================================================
+# ADMIN COMMANDS
+# ============================================================
 
 @bot.message_handler(commands=['stop'])
 def stop_game(message):
@@ -1170,7 +1251,7 @@ def kick_player(message):
     save_game_data()
 
 # ============================================================
-# 🔐 SECRET ADMIN COMMANDS - Works ANYWHERE with @username
+# 🔐 SECRET ADMIN COMMANDS
 # ============================================================
 
 def get_badge_list():
@@ -1181,7 +1262,6 @@ def get_badge_list():
 
 @bot.message_handler(commands=['givecoins'])
 def give_coins_secret(message):
-    """Secret: Give unlimited coins to ANY player (Bot Owner only)"""
     if not is_bot_owner(message):
         return
     
@@ -1197,34 +1277,14 @@ def give_coins_secret(message):
         bot.reply_to(message, "❌ Please enter a valid number!")
         return
     
-    # Search EVERYWHERE for the player
     target_id, target_name_found, in_game = find_player_by_name(target_name)
-    
-    if not target_id:
-        # Try to find by username mention
-        try:
-            # If it's a username, try to get user info
-            if args[1].startswith('@'):
-                username = args[1].replace('@', '')
-                # Try to find in any chat
-                for chat_id, game in active_games.items():
-                    for p in game.players:
-                        if p["name"].lower() == username.lower():
-                            target_id = p["id"]
-                            target_name_found = p["name"]
-                            in_game = True
-                            break
-                    if target_id:
-                        break
-        except:
-            pass
     
     if not target_id:
         bot.reply_to(
             message, 
             f"❌ Player '{target_name}' not found!\n\n"
             f"💡 Make sure they have:\n"
-            f"• Played at least one game with the bot\n"
+            f"• Used `/start` with the bot\n"
             f"• Or type their exact username: @username",
             parse_mode='Markdown'
         )
@@ -1234,7 +1294,6 @@ def give_coins_secret(message):
     stats["coins"] += amount
     stats["name"] = target_name_found
     
-    # Update in active game if playing
     for chat_id, game in active_games.items():
         for p in game.players:
             if p["id"] == target_id:
@@ -1254,7 +1313,6 @@ def give_coins_secret(message):
 
 @bot.message_handler(commands=['givebadge'])
 def give_badge_secret(message):
-    """Secret: Give any badge to ANY player (Bot Owner only)"""
     if not is_bot_owner(message):
         return
     
@@ -1284,7 +1342,7 @@ def give_badge_secret(message):
         bot.reply_to(
             message, 
             f"❌ Player '{target_name}' not found!\n\n"
-            f"💡 Make sure they have played at least one game with the bot.",
+            f"💡 Make sure they have used `/start` with the bot.",
             parse_mode='Markdown'
         )
         return
@@ -1309,7 +1367,6 @@ def give_badge_secret(message):
 
 @bot.message_handler(commands=['removebadge'])
 def remove_badge_secret(message):
-    """Secret: Remove a badge from ANY player (Bot Owner only)"""
     if not is_bot_owner(message):
         return
     
@@ -1331,7 +1388,7 @@ def remove_badge_secret(message):
         bot.reply_to(
             message, 
             f"❌ Player '{target_name}' not found!\n\n"
-            f"💡 Make sure they have played at least one game with the bot.",
+            f"💡 Make sure they have used `/start` with the bot.",
             parse_mode='Markdown'
         )
         return
@@ -1355,7 +1412,6 @@ def remove_badge_secret(message):
 
 @bot.message_handler(commands=['listbadges'])
 def list_badges_secret(message):
-    """Secret: List all available badges (Bot Owner only)"""
     if not is_bot_owner(message):
         return
     
@@ -1369,7 +1425,6 @@ def list_badges_secret(message):
 
 @bot.message_handler(commands=['resetplayer'])
 def reset_player_secret(message):
-    """Secret: Reset a player's stats (Bot Owner only)"""
     if not is_bot_owner(message):
         return
     
@@ -1386,7 +1441,7 @@ def reset_player_secret(message):
         bot.reply_to(
             message, 
             f"❌ Player '{target_name}' not found!\n\n"
-            f"💡 Make sure they have played at least one game with the bot.",
+            f"💡 Make sure they have used `/start` with the bot.",
             parse_mode='Markdown'
         )
         return
@@ -1426,21 +1481,37 @@ def reset_player_secret(message):
 
 @bot.message_handler(commands=['allplayers'])
 def list_all_players_secret(message):
-    """Secret: List ALL players with their stats (Bot Owner only)"""
     if not is_bot_owner(message):
         return
     
-    if not player_data:
-        bot.reply_to(message, "📋 No players found in database!")
+    # Show both user_database and player_data
+    if not user_database and not player_data:
+        bot.reply_to(message, "📋 No users found! Tell users to send `/start` to the bot.")
         return
     
-    msg = "📋 **All Players & Stats**\n\n"
+    msg = "📋 **All Users**\n\n"
+    
+    # Show from user_database
+    if user_database:
+        msg += "👤 **Registered Users:**\n"
+        for uid, data in user_database.items():
+            name = data.get("first_name", "Unknown")
+            username = data.get("username", "")
+            display = f"{name} (@{username})" if username else name
+            msg += f"• {display}\n"
+            if uid in player_data:
+                stats = player_data[uid]
+                msg += f"  💰 {stats['coins']} coins | ⭐ {stats['points']} pts | 🏆 {stats['wins']} wins\n"
+            else:
+                msg += f"  💰 {STARTING_COINS} coins (not played yet)\n"
+        msg += "\n"
+    
+    # Show from player_data (users not in user_database)
     for pid, stats in player_data.items():
-        name = stats.get("name", f"ID: {pid}")
-        msg += f"• **{name}**\n"
-        msg += f"  💰 Coins: {stats['coins']} | ⭐ Points: {stats['points']}\n"
-        msg += f"  🏆 Wins: {stats['wins']} | 🎮 Games: {stats['games']}\n"
-        msg += f"  🎖️ Badges: {len(stats.get('badges', []))}\n\n"
+        if pid not in user_database:
+            name = stats.get("name", f"ID: {pid}")
+            msg += f"• {name}\n"
+            msg += f"  💰 {stats['coins']} coins | ⭐ {stats['points']} pts | 🏆 {stats['wins']} wins\n"
     
     bot.reply_to(message, msg, parse_mode='Markdown')
 
@@ -1528,7 +1599,9 @@ def remove_coins(message):
     save_game_data()
     save_player_data()
 
-# ===== WEBHOOK =====
+# ============================================================
+# WEBHOOK
+# ============================================================
 
 @app.route('/' + BOT_TOKEN, methods=['POST'])
 def webhook():
@@ -1546,8 +1619,11 @@ if __name__ == '__main__':
     
     game_data = load_game_data()
     player_data = load_player_data()
-    print(f"📂 Loaded {len(game_data['games'])} saved games")
+    user_database = load_user_database()
+    
+    print(f"📂 Loaded {len(game_data.get('games', {}))} saved games")
     print(f"📂 Loaded {len(player_data)} player profiles")
+    print(f"📂 Loaded {len(user_database)} registered users")
     
     WEBHOOK_URL = os.environ.get('WEBHOOK_URL')
     if WEBHOOK_URL:
