@@ -491,6 +491,7 @@ class Game:
                     "found_players": self.found_players.copy()
                 }
         else:
+            # WRONG! Swap cards
             old_seeker_role = self.card_map[seeker_id]
             old_chosen_role = self.card_map[chosen_player_id]
             
@@ -517,11 +518,35 @@ class Game:
                 "swapped": f"{old_seeker_role} ↔ {old_chosen_role}"
             })
             
+            # Send DM to seeker with new role
+            try:
+                bot.send_message(
+                    seeker["id"],
+                    f"🔄 **Your card was swapped!**\n\n"
+                    f"Your new role is: **{old_chosen_role}**\n"
+                    f"🤫 Keep it secret!",
+                    parse_mode='Markdown'
+                )
+            except:
+                pass
+            
+            # Send DM to chosen player with new role
+            try:
+                bot.send_message(
+                    chosen_player["id"],
+                    f"🔄 **Your card was swapped!**\n\n"
+                    f"Your new role is: **{old_seeker_role}**\n"
+                    f"🤫 Keep it secret!",
+                    parse_mode='Markdown'
+                )
+            except:
+                pass
+            
             new_seeker = self.get_current_seeker()
             return True, {
                 "result": "wrong",
-                "message": f"❌ WRONG! {seeker['name']} pointed at {chosen_player['name']} (had {chosen_role_full}) {bet_msg}",
-                "swap": f"🔄 Swapped: {old_seeker_role} ↔ {old_chosen_role}",
+                "message": f"❌ WRONG! {seeker['name']} pointed at {chosen_player['name']}! {bet_msg}",
+                "swap": f"🔄 Cards Swapped! (Roles kept secret)",
                 "new_seeker": new_seeker["name"] if new_seeker else "Unknown"
             }
     
@@ -1045,8 +1070,8 @@ def show_history(message):
     
     msg = "🔄 **Swap History:**\n\n"
     for i, swap in enumerate(game.swap_history[-10:], 1):
-        msg += f"{i}. {swap['seeker']} → {swap['chosen']}\n   {swap['swapped']}\n"
-    
+        msg += f"{i}. {swap['seeker']} → {swap['chosen']}\n"
+    # Removed showing swapped roles to keep secret
     bot.reply_to(message, msg, parse_mode='Markdown')
 
 # ============================================================
@@ -1242,11 +1267,9 @@ def get_badge_list():
 
 @bot.message_handler(commands=['sendcoins'])
 def send_coins_by_reply(message):
-    """Secret: Give coins by replying to a player's message (Bot Owner only)"""
     if not is_bot_owner(message):
         return
     
-    # Check if replying to a message
     if not message.reply_to_message:
         bot.reply_to(
             message, 
@@ -1280,21 +1303,17 @@ def send_coins_by_reply(message):
         bot.reply_to(message, "❌ Amount must be greater than 0!")
         return
     
-    # Get the player from the replied message
     replied_user = message.reply_to_message.from_user
     target_id = replied_user.id
     target_name = replied_user.first_name or replied_user.username or "Player"
     username = replied_user.username or ""
     
-    # Get or create stats
     stats = get_player_stats(target_id)
     stats["coins"] += amount
     stats["name"] = target_name
     
-    # Register in user database if not exists
     register_user(target_id, username, target_name, "")
     
-    # Update in active game if playing
     for chat_id, game in active_games.items():
         for p in game.players:
             if p["id"] == target_id:
@@ -1316,7 +1335,6 @@ def send_coins_by_reply(message):
 
 @bot.message_handler(commands=['givecoins'])
 def give_coins_secret(message):
-    """Secret: Give unlimited coins by username (Bot Owner only)"""
     if not is_bot_owner(message):
         return
     
