@@ -3,8 +3,10 @@ import random
 import time
 import threading
 import json
+import re
 from datetime import datetime
 import telebot
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 from flask import Flask, request
 from config import BOT_TOKEN, BOT_OWNER_ID, TIMER_SECONDS, MODES, STARTING_COINS, MIN_BET, MAX_BET
 
@@ -14,12 +16,15 @@ app = Flask(__name__)
 
 # ===== GAME STORAGE =====
 active_games = {}
+game_timers = {}
 game_history = {}
 
 # ===== HELPER FUNCTIONS =====
 
-def is_admin(message):
+def is_admin_or_creator(message, game):
     if message.from_user.id == BOT_OWNER_ID:
+        return True
+    if game and game.creator_id == message.from_user.id:
         return True
     try:
         chat_member = bot.get_chat_member(message.chat.id, message.from_user.id)
@@ -46,7 +51,9 @@ def save_game_data():
                 "current_level": game.current_level,
                 "status": game.status,
                 "card_map": game.card_map,
-                "swap_history": game.swap_history
+                "swap_history": game.swap_history,
+                "creator_id": game.creator_id,
+                "found_players": game.found_players
             }
         with open("game_data.json", "w") as f:
             json.dump(data, f)
@@ -61,11 +68,53 @@ def load_game_data():
     except:
         return {"games": {}, "history": {}}
 
+def check_dm_access(player_id):
+    try:
+        bot.send_chat_action(player_id, 'typing')
+        return True
+    except:
+        return False
+
+def delete_message(chat_id, message_id):
+    try:
+        bot.delete_message(chat_id, message_id)
+    except:
+        pass
+
+# ===== INLINE KEYBOARD FUNCTIONS =====
+
+def get_player_buttons(game, seeker_id, chat_id):
+    """Generate buttons for players who haven't been found yet"""
+    markup = InlineKeyboardMarkup(row_width=2)
+    buttons = []
+    
+    active_players = []
+    for p in game.players:
+        if p["id"] == seeker_id:
+            continue
+        if p["id"] in game.found_players:
+            continue
+        active_players.append(p)
+    
+    if not active_players:
+        return None
+    
+    for p in active_players:
+        buttons.append(InlineKeyboardButton(
+            f"👤 {p['name']}", 
+            callback_data=f"guess_{chat_id}_{p['id']}_{seeker_id}"
+        ))
+    
+    buttons.append(InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_{chat_id}"))
+    markup.add(*buttons)
+    return markup
+
 # ===== GAME CLASS =====
 
 class Game:
-    def __init__(self, mode=4):
+    def __init__(self, mode=4, creator_id=None):
         self.mode = mode
+        self.creator_id = creator_id
         self.players = []
         self.roles = MODES[mode]["roles"].copy()
         self.points = MODES[mode]["points"].copy()
@@ -77,12 +126,17 @@ class Game:
         self.start_time = None
         self.total_rounds = 0
         self.bets = {}
+        self.start_message_id = None
+        self.found_players = []
         
     def add_player(self, player_id, player_name):
         if len(self.players) >= self.mode:
             return False, f"❌ Maximum {self.mode} players reached!"
         if player_id in [p["id"] for p in self.players]:
             return False, "❌ You're already in the game!"
+        
+        if not check_dm_access(player_id):
+            return False, f"❌ {player_name}, please start the bot in DM first!"
         
         self.players.append({
             "id": player_id, 
@@ -99,6 +153,10 @@ class Game:
         if len(self.players) != self.mode:
             return False, f"❌ This mode needs {self.mode} players! {len(self.players)} joined."
         
+        for p in self.players:
+            if not check_dm_access(p["id"]):
+                return False, f"❌ {p['name']} hasn't started the bot in DM!"
+        
         shuffled_roles = self.roles.copy()
         random.shuffle(shuffled_roles)
         for i, player in enumerate(self.players):
@@ -111,18 +169,21 @@ class Game:
         self.current_level = 0
         self.total_rounds += 1
         self.bets = {}
+        self.found_players = []
         
         seeker = self.get_current_seeker()
-        target = self.targets[self.current_level]
+        target = self.get_target_role()
         
         return True, {
             "message": f"🎮 Game started! {len(self.players)} players, {self.mode}-Player Mode",
             "seeker": seeker,
             "target": target,
-            "points": self.points[self.current_level]
+            "points": self.get_points()
         }
     
     def get_current_seeker(self):
+        if self.current_level >= len(self.roles):
+            return None
         role = self.roles[self.current_level]
         for player in self.players:
             if self.card_map.get(player["id"]) == role:
@@ -130,10 +191,17 @@ class Game:
         return None
     
     def get_target_role(self):
-        return self.targets[self.current_level]
+        if self.current_level < len(self.targets):
+            return self.targets[self.current_level]
+        return None
     
     def get_points(self):
-        return self.points[self.current_level]
+        if self.current_level < len(self.points):
+            return self.points[self.current_level]
+        return 0
+    
+    def get_active_players(self):
+        return [p for p in self.players if p["id"] not in self.found_players]
     
     def make_guess(self, seeker_id, chosen_player_id):
         if self.status != "playing":
@@ -143,23 +211,29 @@ class Game:
         if not seeker or seeker["id"] != seeker_id:
             return False, "❌ It's not your turn!"
         
-        target_role = self.targets[self.current_level]
-        chosen_role = self.card_map.get(chosen_player_id, "Unknown")
-        chosen_player = self.get_player(chosen_player_id)
+        target_role = self.get_target_role()
+        if not target_role:
+            return False, "❌ No target found!"
         
+        chosen_role_full = self.card_map.get(chosen_player_id, "Unknown")
+        chosen_role_plain = re.sub(r'[^\w\s]', '', chosen_role_full).strip()
+        
+        chosen_player = self.get_player(chosen_player_id)
         if not chosen_player:
             return False, "❌ Player not found!"
         
         bet_amount = self.bets.get(seeker_id, 0)
         
-        if chosen_role == target_role:
-            # ✅ CORRECT GUESS
-            points = self.points[self.current_level]
+        if chosen_role_plain == target_role:
+            points = self.get_points()
             seeker["points"] += points
+            
+            if seeker["id"] not in self.found_players:
+                self.found_players.append(seeker["id"])
             
             if bet_amount > 0:
                 seeker["coins"] += bet_amount * 2
-                bet_msg = f"💰 Won {bet_amount * 2} coins from bet!"
+                bet_msg = f"💰 Won {bet_amount * 2} coins!"
             else:
                 bet_msg = ""
             
@@ -180,11 +254,12 @@ class Game:
                     "message": f"✅ {seeker['name']} found {target_role}! +{points} points! 🎉 {bet_msg}",
                     "points": points,
                     "next_seeker": next_seeker["name"] if next_seeker else "Unknown",
-                    "next_target": self.targets[self.current_level],
-                    "next_points": self.points[self.current_level]
+                    "next_target": self.get_target_role(),
+                    "next_points": self.get_points(),
+                    "found_players": self.found_players.copy()
                 }
         else:
-            # ❌ WRONG GUESS - SWAP CARDS
+            # WRONG! Swap cards
             old_seeker_role = self.card_map[seeker_id]
             old_chosen_role = self.card_map[chosen_player_id]
             
@@ -193,7 +268,7 @@ class Game:
             
             if bet_amount > 0:
                 seeker["coins"] -= bet_amount
-                bet_msg = f"💰 Lost {bet_amount} coins from bet!"
+                bet_msg = f"💰 Lost {bet_amount} coins!"
             else:
                 bet_msg = ""
             
@@ -204,15 +279,12 @@ class Game:
                 "swapped": f"{old_seeker_role} ↔ {old_chosen_role}"
             })
             
-            # New seeker after swap (the one who got the seeker role)
             new_seeker = self.get_current_seeker()
             return True, {
                 "result": "wrong",
-                "message": f"❌ WRONG! {seeker['name']} pointed at {chosen_player['name']} (had {chosen_role}) {bet_msg}",
+                "message": f"❌ WRONG! {seeker['name']} pointed at {chosen_player['name']} (had {chosen_role_full}) {bet_msg}",
                 "swap": f"🔄 Swapped: {old_seeker_role} ↔ {old_chosen_role}",
-                "new_seeker": new_seeker["name"] if new_seeker else "Unknown",
-                "target": self.targets[self.current_level],
-                "points": self.points[self.current_level]
+                "new_seeker": new_seeker["name"] if new_seeker else "Unknown"
             }
     
     def get_player(self, player_id):
@@ -226,12 +298,13 @@ class Game:
     
     def get_status(self):
         if self.status == "waiting":
-            return f"⏳ Waiting for players... ({len(self.players)}/{self.mode})"
+            return f"⏳ Waiting... ({len(self.players)}/{self.mode})"
         elif self.status == "playing":
             seeker = self.get_current_seeker()
-            target = self.targets[self.current_level]
-            points = self.points[self.current_level]
-            return f"🎯 Level {self.current_level+1}/{len(self.targets)}: {seeker['name']} is searching for {target} (+{points} points)"
+            target = self.get_target_role()
+            points = self.get_points()
+            active_count = len(self.get_active_players())
+            return f"🎯 Level {self.current_level+1}/{len(self.targets)}: {seeker['name'] if seeker else 'Unknown'} → {target} (+{points} pts)\n👥 Active players left: {active_count}"
         else:
             return "🏁 Game Over!"
     
@@ -241,60 +314,244 @@ class Game:
     def get_coin_leaderboard(self):
         return sorted(self.players, key=lambda x: x["coins"], reverse=True)
 
+# ===== CALLBACK HANDLERS =====
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('guess_'))
+def handle_guess(call):
+    try:
+        _, chat_id_str, chosen_id_str, seeker_id_str = call.data.split('_')
+        chat_id = int(chat_id_str)
+        chosen_id = int(chosen_id_str)
+        seeker_id = int(seeker_id_str)
+        
+        user_id = call.from_user.id
+        
+        if user_id != seeker_id:
+            bot.answer_callback_query(call.id, "❌ Not your turn!", show_alert=True)
+            return
+        
+        if chat_id not in active_games:
+            bot.answer_callback_query(call.id, "❌ No active game!", show_alert=True)
+            return
+        
+        game = active_games[chat_id]
+        
+        if game.status != "playing":
+            bot.answer_callback_query(call.id, "❌ Game is not active!", show_alert=True)
+            return
+        
+        if chosen_id in game.found_players:
+            bot.answer_callback_query(call.id, "❌ This player already found their target!", show_alert=True)
+            return
+        
+        if chosen_id == seeker_id:
+            bot.answer_callback_query(call.id, "❌ You can't guess yourself!", show_alert=True)
+            return
+        
+        success, result = game.make_guess(seeker_id, chosen_id)
+        
+        if success:
+            try:
+                bot.delete_message(chat_id, call.message.message_id)
+            except:
+                pass
+            
+            if result["result"] == "correct":
+                if result.get("game_over"):
+                    bot.send_message(chat_id, f"🎉🏆 **{result['message']}**", parse_mode='Markdown')
+                    show_leaderboard_func(chat_id)
+                    save_game_data()
+                else:
+                    next_seeker = game.get_current_seeker()
+                    buttons = get_player_buttons(game, next_seeker["id"], chat_id)
+                    if buttons:
+                        active_count = len(game.get_active_players())
+                        bot.send_message(
+                            chat_id,
+                            f"{result['message']}\n\n"
+                            f"👑 **Next Seeker:** {next_seeker['name']}\n"
+                            f"🎯 **Target:** {result['next_target']}\n"
+                            f"⭐ **Points:** {result['next_points']}\n"
+                            f"👥 **Active Players:** {active_count}\n\n"
+                            f"💡 Click a button to guess!",
+                            reply_markup=buttons,
+                            parse_mode='Markdown'
+                        )
+                        save_game_data()
+                    else:
+                        bot.send_message(chat_id, "❌ No active players left!")
+                        game.status = "ended"
+                        save_game_data()
+            else:
+                # WRONG guess - new seeker gets buttons
+                new_seeker = game.get_current_seeker()
+                buttons = get_player_buttons(game, new_seeker["id"], chat_id)
+                if buttons:
+                    bot.send_message(
+                        chat_id,
+                        f"{result['message']}\n{result['swap']}\n\n"
+                        f"👑 **New Seeker:** {new_seeker['name']}\n\n"
+                        f"💡 Click a button to guess!",
+                        reply_markup=buttons,
+                        parse_mode='Markdown'
+                    )
+                    save_game_data()
+                else:
+                    bot.send_message(chat_id, "❌ No active players left!")
+                    game.status = "ended"
+                    save_game_data()
+            
+            bot.answer_callback_query(call.id, "✅ Done!")
+        else:
+            bot.answer_callback_query(call.id, f"❌ {result}", show_alert=True)
+            
+    except Exception as e:
+        print(f"Callback error: {e}")
+        bot.answer_callback_query(call.id, "❌ Error", show_alert=True)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('cancel_'))
+def handle_cancel(call):
+    chat_id = int(call.data.split('_')[1])
+    try:
+        bot.delete_message(chat_id, call.message.message_id)
+    except:
+        pass
+    bot.answer_callback_query(call.id, "❌ Cancelled")
+
+# ===== SHOW LEADERBOARD FUNCTION =====
+
+def show_leaderboard_func(chat_id):
+    if chat_id not in active_games:
+        return
+    game = active_games[chat_id]
+    sorted_players = game.get_leaderboard()
+    msg = "🏆 **POINTS LEADERBOARD** 🏆\n\n"
+    medals = ["🥇", "🥈", "🥉"]
+    for i, p in enumerate(sorted_players):
+        medal = medals[i] if i < 3 else f"{i+1}."
+        role = game.get_player_role(p["id"])
+        msg += f"{medal} {p['name']} - **{p['points']}** pts ({role})\n"
+    bot.send_message(chat_id, msg, parse_mode='Markdown')
+
 # ===== BOT COMMANDS =====
 
-@bot.message_handler(commands=['start', 'help'])
-def send_help(message):
+@bot.message_handler(commands=['start'])
+def start_command(message):
     help_text = """
 🎮 **RAJA RANI BOT** 🎮
 
-**👋 Welcome!**
+📌 **Commands:**
+`/game` - Create or join a game
+`/join` - Join existing game
+`/mode 4/6/8/10` - Choose player count
+`/startgame` - Start game (Admin/Creator only)
+`/bet X` - Bet 10-50 coins
+`/score` - Points leaderboard
+`/coins` - Coins leaderboard  
+`/mycard` - Your role & stats
+`/status` - Game status
+`/players` - List players
+`/history` - Swap history
 
-📌 **How to Play:**
-1. `/join` - Join the game
-2. `/mode 4/6/8/10` - Choose mode
-3. `/begin` - Start game (admin)
-4. `/point @player` - Guess target
-5. `/bet X` - Bet coins (10-50)
-6. `/score` - Points leaderboard
-7. `/coins` - Coins leaderboard
-8. `/mycard` - See your role
-9. `/status` - Game status
+⚡ **Rules:**
+• Wrong guess = SWAP cards!
+• Correct guess = Earn points!
+• Found players are removed from next rounds
 
-**⚡ Rules:**
-• NO TIMER - Take your time!
-• Correct guess = Earn points + Move to next level
-• Wrong guess = SWAP cards with chosen player
-• After swap, NEW seeker continues searching
-
-**🔐 Admin:** Group admins can manage the game
+🔐 **Admin:** `/stop`, `/reset`, `/kick @player`
 
 *Enjoy!* 🎉
     """
     bot.reply_to(message, help_text, parse_mode='Markdown')
 
+@bot.message_handler(commands=['help'])
+def help_command(message):
+    start_command(message)
+
+@bot.message_handler(commands=['game'])
+def game_command(message):
+    chat_id = message.chat.id
+    
+    if chat_id > 0:
+        bot.reply_to(message, "❌ This command only works in groups!")
+        return
+    
+    user_id = message.from_user.id
+    
+    if chat_id not in active_games:
+        active_games[chat_id] = Game(mode=4, creator_id=user_id)
+        bot.reply_to(
+            message, 
+            "🎮 **Game created!**\n\n"
+            "📌 Default mode: 4 Players\n"
+            "🔄 Use `/mode 4/6/8/10` to change\n"
+            "👋 Use `/join` to join!\n"
+            "🚀 Use `/startgame` to begin (Creator/Admin only)!",
+            parse_mode='Markdown'
+        )
+        save_game_data()
+    else:
+        game = active_games[chat_id]
+        if game.status == "playing":
+            bot.reply_to(message, "❌ Game already in progress!")
+            return
+        
+        player_list = "\n".join([f"• {p['name']}" for p in game.players]) if game.players else "No players yet"
+        bot.send_message(
+            chat_id,
+            f"🎮 **Game Menu**\n\n"
+            f"📌 Mode: {game.mode}-Player\n"
+            f"👥 Players: {len(game.players)}/{game.mode}\n\n"
+            f"{player_list}\n\n"
+            f"👋 Use `/join` to join!\n"
+            f"🚀 Use `/startgame` to begin (Creator/Admin only)!",
+            parse_mode='Markdown'
+        )
+
 @bot.message_handler(commands=['join'])
 def join_game(message):
     chat_id = message.chat.id
-    player_id = message.from_user.id
-    player_name = get_player_name(message.from_user)
+    user_id = message.from_user.id
+    user_name = get_player_name(message.from_user)
+    
+    if chat_id > 0:
+        bot.reply_to(message, "❌ This command only works in groups!")
+        return
     
     if chat_id not in active_games:
-        active_games[chat_id] = Game(mode=4)
+        bot.reply_to(message, "❌ No game! Use `/game` to create one.", parse_mode='Markdown')
+        return
     
     game = active_games[chat_id]
-    success, msg = game.add_player(player_id, player_name)
+    
+    if game.status == "playing":
+        bot.reply_to(message, "❌ Game already in progress!")
+        return
+    
+    success, msg = game.add_player(user_id, user_name)
     bot.reply_to(message, msg)
+    
     if success:
         save_game_data()
+        player_list = "\n".join([f"• {p['name']}" for p in game.players])
+        bot.send_message(
+            chat_id,
+            f"👥 **Players ({len(game.players)}/{game.mode}):**\n\n{player_list}\n\n"
+            f"🚀 Use `/startgame` to begin (Creator/Admin only)!",
+            parse_mode='Markdown'
+        )
 
 @bot.message_handler(commands=['mode'])
 def set_mode(message):
     chat_id = message.chat.id
     args = message.text.split()
     
+    if chat_id > 0:
+        bot.reply_to(message, "❌ This command only works in groups!")
+        return
+    
     if len(args) < 2:
-        bot.reply_to(message, "❌ Usage: /mode 4/6/8/10")
+        bot.reply_to(message, "❌ Usage: `/mode 4/6/8/10`", parse_mode='Markdown')
         return
     
     try:
@@ -304,28 +561,44 @@ def set_mode(message):
             return
         
         if chat_id in active_games and active_games[chat_id].status == "playing":
-            bot.reply_to(message, "❌ Can't change mode during game! Use /reset first.")
+            bot.reply_to(message, "❌ Can't change mode during game! Use `/reset` first.", parse_mode='Markdown')
             return
         
-        active_games[chat_id] = Game(mode=mode)
-        bot.reply_to(message, f"✅ Mode set to {mode}-Player mode! Use /join to join.")
+        active_games[chat_id] = Game(mode=mode, creator_id=message.from_user.id)
+        bot.reply_to(
+            message,
+            f"✅ Mode set to {mode}-Player mode!\n"
+            f"👑 Creator: {message.from_user.first_name}\n\n"
+            f"👋 Use `/join` to join!\n"
+            f"🚀 Use `/startgame` to begin!",
+            parse_mode='Markdown'
+        )
         save_game_data()
     except ValueError:
         bot.reply_to(message, "❌ Please enter a valid number!")
 
-@bot.message_handler(commands=['begin'])
-def begin_game(message):
+@bot.message_handler(commands=['startgame'])
+def start_game_command(message):
     chat_id = message.chat.id
     
-    if not is_admin(message):
-        bot.reply_to(message, "❌ Only group admin can start the game!")
+    if chat_id > 0:
+        bot.reply_to(message, "❌ This command only works in groups!")
         return
     
     if chat_id not in active_games:
-        bot.reply_to(message, "❌ No game found! Use /join first.")
+        bot.reply_to(message, "❌ No game! Use `/game` to create one.", parse_mode='Markdown')
         return
     
     game = active_games[chat_id]
+    
+    if game.status != "waiting":
+        bot.reply_to(message, "❌ Game already started or ended!")
+        return
+    
+    if not is_admin_or_creator(message, game):
+        bot.reply_to(message, "❌ Only the game creator or group admin can start the game!")
+        return
+    
     success, result = game.start_game()
     
     if success:
@@ -340,87 +613,38 @@ def begin_game(message):
             except:
                 pass
         
-        bot.reply_to(
-            message, 
-            f"{result['message']}\n\n"
-            f"👑 **Seeker:** {result['seeker']['name']}\n"
-            f"🎯 **Target:** {result['target']}\n"
-            f"⭐ **Points:** {result['points']}\n\n"
-            f"💡 Type `/point @player` to guess!",
-            parse_mode='Markdown'
-        )
-        
-        save_game_data()
-    else:
-        bot.reply_to(message, f"❌ {result}")
-
-@bot.message_handler(commands=['point'])
-def make_guess(message):
-    chat_id = message.chat.id
-    player_id = message.from_user.id
-    
-    if chat_id not in active_games:
-        bot.reply_to(message, "❌ No active game!")
-        return
-    
-    game = active_games[chat_id]
-    if game.status != "playing":
-        bot.reply_to(message, "❌ Game is not active! Use /begin to start.")
-        return
-    
-    args = message.text.split()
-    if len(args) < 2:
-        bot.reply_to(message, "❌ Usage: /point @player\nExample: /point @John")
-        return
-    
-    target_name = args[1].replace('@', '').strip()
-    target_player = None
-    for p in game.players:
-        if p["name"].lower() == target_name.lower():
-            target_player = p
-            break
-    
-    if not target_player:
-        bot.reply_to(message, f"❌ Player '{target_name}' not found!")
-        return
-    
-    success, result = game.make_guess(player_id, target_player["id"])
-    
-    if success:
-        if result["result"] == "correct":
-            if result.get("game_over"):
-                bot.reply_to(message, f"🎉🏆 **{result['message']}**", parse_mode='Markdown')
-                show_leaderboard(message)
-                show_coin_leaderboard(message)
-                save_game_data()
-            else:
-                bot.reply_to(
-                    message,
-                    f"{result['message']}\n\n"
-                    f"👑 **Next Seeker:** {result['next_seeker']}\n"
-                    f"🎯 **Target:** {result['next_target']}\n"
-                    f"⭐ **Points:** {result['next_points']}",
-                    parse_mode='Markdown'
-                )
-                save_game_data()
-        else:
-            bot.reply_to(
-                message,
-                f"{result['message']}\n{result['swap']}\n\n"
-                f"👑 **New Seeker:** {result['new_seeker']}\n"
+        buttons = get_player_buttons(game, result['seeker']["id"], chat_id)
+        if buttons:
+            active_count = len(game.get_active_players())
+            msg = bot.send_message(
+                chat_id, 
+                f"🎮 **GAME STARTED!**\n\n"
+                f"👑 **Seeker:** {result['seeker']['name']}\n"
                 f"🎯 **Target:** {result['target']}\n"
-                f"⭐ **Points:** {result['points']}\n\n"
-                f"💡 Continue guessing!",
+                f"⭐ **Points:** {result['points']}\n"
+                f"👥 **Active Players:** {active_count}\n\n"
+                f"💡 Click a button to guess!",
+                reply_markup=buttons,
                 parse_mode='Markdown'
             )
+            
+            game.start_message_id = msg.message_id
+            save_game_data()
+        else:
+            bot.send_message(chat_id, "❌ No active players to guess!")
+            game.status = "ended"
             save_game_data()
     else:
-        bot.reply_to(message, f"❌ {result}")
+        bot.send_message(chat_id, f"❌ {result}")
 
 @bot.message_handler(commands=['bet'])
 def place_bet(message):
     chat_id = message.chat.id
     player_id = message.from_user.id
+    
+    if chat_id > 0:
+        bot.reply_to(message, "❌ This command only works in groups!")
+        return
     
     if chat_id not in active_games:
         bot.reply_to(message, "❌ No active game!")
@@ -433,13 +657,13 @@ def place_bet(message):
     
     args = message.text.split()
     if len(args) < 2:
-        bot.reply_to(message, f"❌ Usage: /bet 10-{MAX_BET}")
+        bot.reply_to(message, f"❌ Usage: `/bet 10-{MAX_BET}`", parse_mode='Markdown')
         return
     
     try:
         bet_amount = int(args[1])
         if bet_amount < MIN_BET or bet_amount > MAX_BET:
-            bot.reply_to(message, f"❌ Bet must be between {MIN_BET} and {MAX_BET} coins!")
+            bot.reply_to(message, f"❌ Bet must be between {MIN_BET} and {MAX_BET}!")
             return
         
         player = game.get_player(player_id)
@@ -452,10 +676,10 @@ def place_bet(message):
             return
         
         game.bets[player_id] = bet_amount
-        bot.reply_to(message, f"💰 Bet placed: {bet_amount} coins on your success!\n💡 Type /point @player to guess!")
+        bot.reply_to(message, f"💰 Bet placed: {bet_amount} coins!\n💡 Click a button to guess!")
         
     except ValueError:
-        bot.reply_to(message, "❌ Please enter a valid number!")
+        bot.reply_to(message, "❌ Enter a valid number!")
 
 @bot.message_handler(commands=['score'])
 def show_leaderboard(message):
@@ -472,7 +696,8 @@ def show_leaderboard(message):
     for i, p in enumerate(sorted_players):
         medal = medals[i] if i < 3 else f"{i+1}."
         role = game.get_player_role(p["id"])
-        msg += f"{medal} {p['name']} - **{p['points']}** pts ({role})\n"
+        status = "✅ Found" if p["id"] in game.found_players else "🔄 Active"
+        msg += f"{medal} {p['name']} - **{p['points']}** pts ({role}) - {status}\n"
     
     bot.reply_to(message, msg, parse_mode='Markdown')
 
@@ -509,9 +734,8 @@ def show_my_card(message):
     player = game.get_player(player_id)
     
     if player:
-        msg = f"🃏 **Your Role:** {role}\n"
-        msg += f"💰 **Coins:** {player['coins']}\n"
-        msg += f"⭐ **Points:** {player['points']}"
+        status = "✅ Found" if player["id"] in game.found_players else "🔄 Active"
+        msg = f"🃏 **Your Role:** {role}\n💰 **Coins:** {player['coins']}\n⭐ **Points:** {player['points']}\n📌 **Status:** {status}"
         bot.reply_to(message, msg, parse_mode='Markdown')
     else:
         bot.reply_to(message, "❌ You're not in this game!")
@@ -528,6 +752,9 @@ def show_status(message):
     
     msg = f"📊 **GAME STATUS**\n\n{status}\n\n"
     msg += f"👥 **Players:** {len(game.players)}/{game.mode}\n"
+    active_count = len(game.get_active_players())
+    msg += f"✅ **Found Players:** {len(game.found_players)}\n"
+    msg += f"🔄 **Active Players:** {active_count}\n"
     
     if game.status == "playing":
         seeker = game.get_current_seeker()
@@ -535,39 +762,8 @@ def show_status(message):
             msg += f"👑 **Seeker:** {seeker['name']}\n"
         msg += f"🎯 **Target:** {game.get_target_role()}\n"
         msg += f"⭐ **Points:** {game.get_points()}\n"
-        msg += f"⏱️ **Timer:** No timer! Take your time!"
     
     bot.reply_to(message, msg, parse_mode='Markdown')
-
-@bot.message_handler(commands=['reset'])
-def reset_game(message):
-    chat_id = message.chat.id
-    if not is_admin(message):
-        bot.reply_to(message, "❌ Only admin can reset!")
-        return
-    
-    if chat_id in active_games:
-        del active_games[chat_id]
-        bot.reply_to(message, "✅ Game reset successfully! Use /join to start new game.")
-        save_game_data()
-    else:
-        bot.reply_to(message, "❌ No game to reset!")
-
-@bot.message_handler(commands=['end'])
-def end_game(message):
-    chat_id = message.chat.id
-    if not is_admin(message):
-        bot.reply_to(message, "❌ Only admin can end!")
-        return
-    
-    if chat_id in active_games:
-        active_games[chat_id].status = "ended"
-        bot.reply_to(message, "🏁 **Game Ended!** Final Results:", parse_mode='Markdown')
-        show_leaderboard(message)
-        show_coin_leaderboard(message)
-        save_game_data()
-    else:
-        bot.reply_to(message, "❌ No game to end!")
 
 @bot.message_handler(commands=['players'])
 def show_players(message):
@@ -580,7 +776,8 @@ def show_players(message):
     msg = "👥 **Players:**\n\n"
     for i, p in enumerate(game.players, 1):
         role = game.get_player_role(p["id"])
-        msg += f"{i}. {p['name']} - {role if game.status != 'waiting' else '🔒 Hidden'}\n"
+        status = "✅ Found" if p["id"] in game.found_players else "🔄 Active"
+        msg += f"{i}. {p['name']} - {role} - {status}\n"
     
     bot.reply_to(message, msg, parse_mode='Markdown')
 
@@ -602,17 +799,111 @@ def show_history(message):
     
     bot.reply_to(message, msg, parse_mode='Markdown')
 
+@bot.message_handler(commands=['stop'])
+def stop_game(message):
+    chat_id = message.chat.id
+    
+    if chat_id > 0:
+        bot.reply_to(message, "❌ This command only works in groups!")
+        return
+    
+    if chat_id not in active_games:
+        bot.reply_to(message, "❌ No active game!")
+        return
+    
+    game = active_games[chat_id]
+    if not is_admin_or_creator(message, game):
+        bot.reply_to(message, "❌ Only admin/creator can stop!")
+        return
+    
+    if game.status != "playing":
+        bot.reply_to(message, "❌ Game is not active!")
+        return
+    
+    game.status = "ended"
+    bot.reply_to(message, "⏹️ **Game stopped!**", parse_mode='Markdown')
+    show_leaderboard(message)
+    save_game_data()
+
+@bot.message_handler(commands=['reset'])
+def reset_game(message):
+    chat_id = message.chat.id
+    
+    if chat_id > 0:
+        bot.reply_to(message, "❌ This command only works in groups!")
+        return
+    
+    if not is_admin_or_creator(message, active_games.get(chat_id)):
+        bot.reply_to(message, "❌ Only admin/creator can reset!")
+        return
+    
+    if chat_id in active_games:
+        game = active_games[chat_id]
+        del active_games[chat_id]
+        if chat_id in game_timers:
+            del game_timers[chat_id]
+        bot.reply_to(message, "🔄 **Game reset!** Use `/game` to start new.", parse_mode='Markdown')
+        save_game_data()
+    else:
+        bot.reply_to(message, "❌ No game to reset!")
+
+@bot.message_handler(commands=['kick'])
+def kick_player(message):
+    chat_id = message.chat.id
+    
+    if chat_id > 0:
+        bot.reply_to(message, "❌ This command only works in groups!")
+        return
+    
+    if not is_admin_or_creator(message, active_games.get(chat_id)):
+        bot.reply_to(message, "❌ Only admin/creator can kick!")
+        return
+    
+    args = message.text.split()
+    if len(args) < 2:
+        bot.reply_to(message, "❌ Usage: `/kick @player`", parse_mode='Markdown')
+        return
+    
+    target_name = args[1].replace('@', '').strip()
+    
+    if chat_id not in active_games:
+        bot.reply_to(message, "❌ No active game!")
+        return
+    
+    game = active_games[chat_id]
+    target = None
+    for p in game.players:
+        if p["name"].lower() == target_name.lower():
+            target = p
+            break
+    
+    if not target:
+        bot.reply_to(message, f"❌ Player '{target_name}' not found!")
+        return
+    
+    if target["id"] == BOT_OWNER_ID:
+        bot.reply_to(message, "❌ Cannot kick Bot Owner!")
+        return
+    
+    game.players.remove(target)
+    if target["id"] in game.card_map:
+        del game.card_map[target["id"]]
+    if target["id"] in game.found_players:
+        game.found_players.remove(target["id"])
+    
+    bot.reply_to(message, f"✅ {target['name']} kicked from game!")
+    save_game_data()
+
 # ===== BOT OWNER COMMANDS =====
 
 @bot.message_handler(commands=['addcoins'])
 def add_coins(message):
     if not is_bot_owner(message):
-        bot.reply_to(message, "❌ Only Bot Owner can use this!")
         return
     
     args = message.text.split()
     if len(args) < 3:
-        bot.reply_to(message, "❌ Usage: /addcoins @player amount")
+        bot.reply_to(message, "❌ Usage: `/addcoins @player amount`", parse_mode='Markdown')
         return
     
     target_name = args[1].replace('@', '').strip()
@@ -645,12 +936,11 @@ def add_coins(message):
 @bot.message_handler(commands=['removecoins'])
 def remove_coins(message):
     if not is_bot_owner(message):
-        bot.reply_to(message, "❌ Only Bot Owner can use this!")
         return
     
     args = message.text.split()
     if len(args) < 3:
-        bot.reply_to(message, "❌ Usage: /removecoins @player amount")
+        bot.reply_to(message, "❌ Usage: `/removecoins @player amount`", parse_mode='Markdown')
         return
     
     target_name = args[1].replace('@', '').strip()
@@ -687,12 +977,11 @@ def remove_coins(message):
 @bot.message_handler(commands=['setcoins'])
 def set_coins(message):
     if not is_bot_owner(message):
-        bot.reply_to(message, "❌ Only Bot Owner can use this!")
         return
     
     args = message.text.split()
     if len(args) < 3:
-        bot.reply_to(message, "❌ Usage: /setcoins @player amount")
+        bot.reply_to(message, "❌ Usage: `/setcoins @player amount`", parse_mode='Markdown')
         return
     
     target_name = args[1].replace('@', '').strip()
@@ -728,7 +1017,6 @@ def set_coins(message):
 @bot.message_handler(commands=['resetcoins'])
 def reset_all_coins(message):
     if not is_bot_owner(message):
-        bot.reply_to(message, "❌ Only Bot Owner can use this!")
         return
     
     chat_id = message.chat.id
@@ -743,47 +1031,7 @@ def reset_all_coins(message):
     bot.reply_to(message, f"✅ Reset all players to {STARTING_COINS} coins!")
     save_game_data()
 
-@bot.message_handler(commands=['kick'])
-def kick_player(message):
-    if not is_admin(message):
-        bot.reply_to(message, "❌ Only admin can kick players!")
-        return
-    
-    args = message.text.split()
-    if len(args) < 2:
-        bot.reply_to(message, "❌ Usage: /kick @player")
-        return
-    
-    target_name = args[1].replace('@', '').strip()
-    chat_id = message.chat.id
-    
-    if chat_id not in active_games:
-        bot.reply_to(message, "❌ No active game!")
-        return
-    
-    game = active_games[chat_id]
-    target = None
-    for p in game.players:
-        if p["name"].lower() == target_name.lower():
-            target = p
-            break
-    
-    if not target:
-        bot.reply_to(message, f"❌ Player '{target_name}' not found!")
-        return
-    
-    if target["id"] == BOT_OWNER_ID:
-        bot.reply_to(message, "❌ Cannot kick Bot Owner!")
-        return
-    
-    game.players.remove(target)
-    if target["id"] in game.card_map:
-        del game.card_map[target["id"]]
-    
-    bot.reply_to(message, f"✅ {target['name']} has been kicked from the game!")
-    save_game_data()
-
-# ===== WEBHOOK FOR RENDER =====
+# ===== WEBHOOK =====
 
 @app.route('/' + BOT_TOKEN, methods=['POST'])
 def webhook():
@@ -796,12 +1044,8 @@ def webhook():
 def index():
     return '🤖 Raja Rani Bot is running!', 200
 
-# ===== START BOT =====
-
 if __name__ == '__main__':
     print("🤖 RAJA RANI BOT STARTED!")
-    print("📡 Running on Render...")
-    
     data = load_game_data()
     print(f"📂 Loaded {len(data['games'])} saved games")
     
