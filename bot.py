@@ -72,7 +72,8 @@ def get_player_stats(player_id):
             "swaps_survived": 0,
             "last_daily": None,
             "badges": [],
-            "total_correct": 0
+            "total_correct": 0,
+            "name": None
         }
         save_player_data()
     return player_data[str(player_id)]
@@ -197,6 +198,54 @@ def delete_message(chat_id, message_id):
     except:
         pass
 
+# ===== FIND PLAYER FUNCTION - WORKS EVERYWHERE =====
+
+def find_player_by_name(target_name):
+    """
+    Search for a player by name or @username
+    Works in: active games, saved data, ANY player who ever interacted
+    """
+    target_name = target_name.replace('@', '').strip().lower()
+    
+    # 1. Search in active games
+    for chat_id, game in active_games.items():
+        for p in game.players:
+            if p["name"].lower() == target_name:
+                return p["id"], p["name"], True
+    
+    # 2. Search in saved player data
+    for pid, stats in player_data.items():
+        # Check stored name
+        stored_name = stats.get("name", "")
+        if stored_name.lower() == target_name:
+            return int(pid), stored_name, False
+        
+        # Check if we can find name from any active game
+        for chat_id, game in active_games.items():
+            for p in game.players:
+                if str(p["id"]) == pid:
+                    if p["name"].lower() == target_name:
+                        stats["name"] = p["name"]
+                        save_player_data()
+                        return p["id"], p["name"], False
+                    break
+    
+    return None, None, False
+
+def find_player_by_id(player_id):
+    """Get player name by ID"""
+    # Check active games
+    for chat_id, game in active_games.items():
+        for p in game.players:
+            if p["id"] == player_id:
+                return p["name"]
+    
+    # Check stored data
+    if str(player_id) in player_data:
+        return player_data[str(player_id)].get("name", f"Player_{player_id}")
+    
+    return None
+
 # ===== INLINE KEYBOARD FUNCTIONS =====
 
 def get_player_buttons(game, seeker_id, chat_id):
@@ -262,7 +311,11 @@ class Game:
             "joined_at": datetime.now().isoformat()
         })
         
-        get_player_stats(player_id)
+        # Update player data with name
+        stats = get_player_stats(player_id)
+        stats["name"] = player_name
+        save_player_data()
+        
         return True, f"✅ {player_name} joined! ({len(self.players)}/{self.mode})"
     
     def start_game(self):
@@ -1117,8 +1170,7 @@ def kick_player(message):
     save_game_data()
 
 # ============================================================
-# 🔐 SECRET ADMIN COMMANDS (Hidden from everyone)
-# Only Bot Owner can use these - doesn't show in /help
+# 🔐 SECRET ADMIN COMMANDS - Works ANYWHERE with @username
 # ============================================================
 
 def get_badge_list():
@@ -1129,7 +1181,7 @@ def get_badge_list():
 
 @bot.message_handler(commands=['givecoins'])
 def give_coins_secret(message):
-    """Secret: Give unlimited coins to any player (Bot Owner only)"""
+    """Secret: Give unlimited coins to ANY player (Bot Owner only)"""
     if not is_bot_owner(message):
         return
     
@@ -1145,25 +1197,44 @@ def give_coins_secret(message):
         bot.reply_to(message, "❌ Please enter a valid number!")
         return
     
-    target_id = None
-    target_name_found = None
-    
-    for chat_id, game in active_games.items():
-        for p in game.players:
-            if p["name"].lower() == target_name.lower():
-                target_id = p["id"]
-                target_name_found = p["name"]
-                break
-        if target_id:
-            break
+    # Search EVERYWHERE for the player
+    target_id, target_name_found, in_game = find_player_by_name(target_name)
     
     if not target_id:
-        bot.reply_to(message, f"❌ Player '{target_name}' not found!")
+        # Try to find by username mention
+        try:
+            # If it's a username, try to get user info
+            if args[1].startswith('@'):
+                username = args[1].replace('@', '')
+                # Try to find in any chat
+                for chat_id, game in active_games.items():
+                    for p in game.players:
+                        if p["name"].lower() == username.lower():
+                            target_id = p["id"]
+                            target_name_found = p["name"]
+                            in_game = True
+                            break
+                    if target_id:
+                        break
+        except:
+            pass
+    
+    if not target_id:
+        bot.reply_to(
+            message, 
+            f"❌ Player '{target_name}' not found!\n\n"
+            f"💡 Make sure they have:\n"
+            f"• Played at least one game with the bot\n"
+            f"• Or type their exact username: @username",
+            parse_mode='Markdown'
+        )
         return
     
     stats = get_player_stats(target_id)
     stats["coins"] += amount
+    stats["name"] = target_name_found
     
+    # Update in active game if playing
     for chat_id, game in active_games.items():
         for p in game.players:
             if p["id"] == target_id:
@@ -1183,7 +1254,7 @@ def give_coins_secret(message):
 
 @bot.message_handler(commands=['givebadge'])
 def give_badge_secret(message):
-    """Secret: Give any badge to a player (Bot Owner only)"""
+    """Secret: Give any badge to ANY player (Bot Owner only)"""
     if not is_bot_owner(message):
         return
     
@@ -1207,23 +1278,19 @@ def give_badge_secret(message):
         )
         return
     
-    target_id = None
-    target_name_found = None
-    
-    for chat_id, game in active_games.items():
-        for p in game.players:
-            if p["name"].lower() == target_name.lower():
-                target_id = p["id"]
-                target_name_found = p["name"]
-                break
-        if target_id:
-            break
+    target_id, target_name_found, in_game = find_player_by_name(target_name)
     
     if not target_id:
-        bot.reply_to(message, f"❌ Player '{target_name}' not found!")
+        bot.reply_to(
+            message, 
+            f"❌ Player '{target_name}' not found!\n\n"
+            f"💡 Make sure they have played at least one game with the bot.",
+            parse_mode='Markdown'
+        )
         return
     
     stats = get_player_stats(target_id)
+    stats["name"] = target_name_found
     
     if badge_key in stats["badges"]:
         bot.reply_to(message, f"❌ {target_name_found} already has **{ACHIEVEMENTS[badge_key]['name']}**!", parse_mode='Markdown')
@@ -1242,7 +1309,7 @@ def give_badge_secret(message):
 
 @bot.message_handler(commands=['removebadge'])
 def remove_badge_secret(message):
-    """Secret: Remove a badge from a player (Bot Owner only)"""
+    """Secret: Remove a badge from ANY player (Bot Owner only)"""
     if not is_bot_owner(message):
         return
     
@@ -1258,23 +1325,19 @@ def remove_badge_secret(message):
         bot.reply_to(message, f"❌ Badge '{badge_key}' not found!", parse_mode='Markdown')
         return
     
-    target_id = None
-    target_name_found = None
-    
-    for chat_id, game in active_games.items():
-        for p in game.players:
-            if p["name"].lower() == target_name.lower():
-                target_id = p["id"]
-                target_name_found = p["name"]
-                break
-        if target_id:
-            break
+    target_id, target_name_found, in_game = find_player_by_name(target_name)
     
     if not target_id:
-        bot.reply_to(message, f"❌ Player '{target_name}' not found!")
+        bot.reply_to(
+            message, 
+            f"❌ Player '{target_name}' not found!\n\n"
+            f"💡 Make sure they have played at least one game with the bot.",
+            parse_mode='Markdown'
+        )
         return
     
     stats = get_player_stats(target_id)
+    stats["name"] = target_name_found
     
     if badge_key not in stats["badges"]:
         bot.reply_to(message, f"❌ {target_name_found} doesn't have **{ACHIEVEMENTS[badge_key]['name']}**!", parse_mode='Markdown')
@@ -1317,20 +1380,15 @@ def reset_player_secret(message):
     
     target_name = args[1].replace('@', '').strip()
     
-    target_id = None
-    target_name_found = None
-    
-    for chat_id, game in active_games.items():
-        for p in game.players:
-            if p["name"].lower() == target_name.lower():
-                target_id = p["id"]
-                target_name_found = p["name"]
-                break
-        if target_id:
-            break
+    target_id, target_name_found, in_game = find_player_by_name(target_name)
     
     if not target_id:
-        bot.reply_to(message, f"❌ Player '{target_name}' not found!")
+        bot.reply_to(
+            message, 
+            f"❌ Player '{target_name}' not found!\n\n"
+            f"💡 Make sure they have played at least one game with the bot.",
+            parse_mode='Markdown'
+        )
         return
     
     player_data[str(target_id)] = {
@@ -1344,7 +1402,8 @@ def reset_player_secret(message):
         "swaps_survived": 0,
         "last_daily": None,
         "badges": [],
-        "total_correct": 0
+        "total_correct": 0,
+        "name": target_name_found
     }
     
     for chat_id, game in active_games.items():
@@ -1367,7 +1426,7 @@ def reset_player_secret(message):
 
 @bot.message_handler(commands=['allplayers'])
 def list_all_players_secret(message):
-    """Secret: List all players with their stats (Bot Owner only)"""
+    """Secret: List ALL players with their stats (Bot Owner only)"""
     if not is_bot_owner(message):
         return
     
@@ -1377,28 +1436,13 @@ def list_all_players_secret(message):
     
     msg = "📋 **All Players & Stats**\n\n"
     for pid, stats in player_data.items():
-        # Try to get player name from active games
-        name = f"ID: {pid}"
-        for chat_id, game in active_games.items():
-            for p in game.players:
-                if str(p["id"]) == pid:
-                    name = p["name"]
-                    break
-            if name != f"ID: {pid}":
-                break
-        
+        name = stats.get("name", f"ID: {pid}")
         msg += f"• **{name}**\n"
         msg += f"  💰 Coins: {stats['coins']} | ⭐ Points: {stats['points']}\n"
         msg += f"  🏆 Wins: {stats['wins']} | 🎮 Games: {stats['games']}\n"
         msg += f"  🎖️ Badges: {len(stats.get('badges', []))}\n\n"
     
     bot.reply_to(message, msg, parse_mode='Markdown')
-
-# ============================================================
-# END OF SECRET ADMIN COMMANDS
-# ============================================================
-
-# ===== BOT OWNER COIN COMMANDS (Also hidden) =====
 
 @bot.message_handler(commands=['addcoins'])
 def add_coins(message):
