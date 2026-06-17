@@ -31,6 +31,7 @@ def set_bot_commands():
         BotCommand("history", "🔄 View swap history"),
         BotCommand("daily", "🎁 Claim daily bonus"),
         BotCommand("profile", "👤 View your profile & achievements"),
+        BotCommand("kill", "💀 Kill/End current game (Admin/creator only)"),
     ]
     bot.set_my_commands(commands)
     print("✅ Bot commands set!")
@@ -283,7 +284,7 @@ def find_player_by_username_or_name(search_term):
     return None, None, False
 
 # ============================================================
-# INLINE KEYBOARD FUNCTIONS
+# INLINE KEYBOARD FUNCTIONS (No Cancel Button)
 # ============================================================
 
 def get_player_buttons(game, seeker_id, chat_id):
@@ -307,7 +308,7 @@ def get_player_buttons(game, seeker_id, chat_id):
             callback_data=f"guess_{chat_id}_{p['id']}_{seeker_id}"
         ))
     
-    buttons.append(InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_{chat_id}"))
+    # Cancel button removed
     markup.add(*buttons)
     return markup
 
@@ -673,15 +674,6 @@ def handle_guess(call):
         print(f"Callback error: {e}")
         bot.answer_callback_query(call.id, "❌ Error", show_alert=True)
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith('cancel_'))
-def handle_cancel(call):
-    chat_id = int(call.data.split('_')[1])
-    try:
-        bot.delete_message(chat_id, call.message.message_id)
-    except:
-        pass
-    bot.answer_callback_query(call.id, "❌ Cancelled")
-
 # ============================================================
 # SHOW LEADERBOARD FUNCTION
 # ============================================================
@@ -718,6 +710,7 @@ def start_command(message):
 `/mode 4/6/8/10` - Choose player count
 `/startgame` - Start game
 `/bet X` - Bet 10-50 coins
+`/kill` - Kill/end current game (Admin/Creator only)
 
 📊 **Info Commands:**
 `/score` - Points leaderboard
@@ -837,7 +830,7 @@ def set_mode(message):
             return
         
         if chat_id in active_games and active_games[chat_id].status == "playing":
-            bot.reply_to(message, "❌ Can't change mode during game! Use `/reset` first.", parse_mode='Markdown')
+            bot.reply_to(message, "❌ Can't change mode during game! Use `/kill` or `/reset` first.", parse_mode='Markdown')
             return
         
         active_games[chat_id] = Game(mode=mode, creator_id=message.from_user.id)
@@ -1071,7 +1064,6 @@ def show_history(message):
     msg = "🔄 **Swap History:**\n\n"
     for i, swap in enumerate(game.swap_history[-10:], 1):
         msg += f"{i}. {swap['seeker']} → {swap['chosen']}\n"
-    # Removed showing swapped roles to keep secret
     bot.reply_to(message, msg, parse_mode='Markdown')
 
 # ============================================================
@@ -1187,6 +1179,58 @@ def stop_game(message):
     show_leaderboard(message)
     save_game_data()
 
+# ============================================================
+# /kill COMMAND - Instantly ends the game
+# ============================================================
+
+@bot.message_handler(commands=['kill'])
+def kill_game(message):
+    chat_id = message.chat.id
+    
+    if chat_id > 0:
+        bot.reply_to(message, "❌ This command only works in groups!")
+        return
+    
+    if chat_id not in active_games:
+        bot.reply_to(message, "❌ No active game to kill!")
+        return
+    
+    game = active_games[chat_id]
+    
+    if not is_admin_or_creator(message, game):
+        bot.reply_to(message, "❌ Only the game creator or group admin can kill the game!")
+        return
+    
+    if game.status != "playing":
+        bot.reply_to(message, "❌ Game is not active!")
+        return
+    
+    # Kill the game - set status to ended
+    game.status = "ended"
+    game.timer_active = False
+    
+    # Send kill message
+    bot.send_message(
+        chat_id,
+        f"💀 **GAME KILLED!**\n\n"
+        f"**{message.from_user.first_name}** ended the game!\n"
+        f"👥 Final players: {len(game.players)}\n"
+        f"📊 Final results:",
+        parse_mode='Markdown'
+    )
+    
+    # Show final leaderboard
+    show_leaderboard(message)
+    show_coin_leaderboard(message)
+    save_game_data()
+    
+    # Clean up
+    if chat_id in game_timers:
+        try:
+            del game_timers[chat_id]
+        except:
+            pass
+
 @bot.message_handler(commands=['reset'])
 def reset_game(message):
     chat_id = message.chat.id
@@ -1256,7 +1300,7 @@ def kick_player(message):
     save_game_data()
 
 # ============================================================
-# 🔐 SECRET ADMIN COMMANDS - Reply to give coins
+# 🔐 SECRET ADMIN COMMANDS
 # ============================================================
 
 def get_badge_list():
