@@ -1,3 +1,7 @@
+# ============================================
+# CARD WARFARE BOT - CONFIGURATION
+# ============================================
+
 import os
 
 # ===== BOT SETTINGS =====
@@ -6,45 +10,41 @@ BOT_OWNER_ID = int(os.environ.get('BOT_OWNER_ID', 123456789))
 
 # ===== GAME SETTINGS =====
 TIMER_SECONDS = int(os.environ.get('TIMER_SECONDS', 30))
-STARTING_COINS = int(os.environ.get('STARTING_COINS', 100))
-MIN_BET = int(os.environ.get('MIN_BET', 10))
-MAX_BET = int(os.environ.get('MAX_BET', 50))
 
-# ===== MODE CONFIGURATION =====
-MODES = {
-    4: {
-        "name": "4-Player",
-        "roles": ["👑 King", "👸 Queen", "👮 Police", "🕵️ Chor"],
-        "points": [100, 80, 50],
-        "targets": ["Queen", "Police", "Chor"]
-    },
-    6: {
-        "name": "6-Player", 
-        "roles": ["👑 King", "👸 Queen", "🧙 Minister", "⚔️ Commander", "👮 Police", "🕵️ Chor"],
-        "points": [100, 90, 80, 70, 50],
-        "targets": ["Queen", "Minister", "Commander", "Police", "Chor"]
-    },
-    8: {
-        "name": "8-Player",
-        "roles": ["👑 King", "👸 Queen", "🧙 Minister", "⚔️ Commander", "🕵️ Detective", "👮 Police", "🥷 Spy", "🕵️ Chor"],
-        "points": [100, 90, 80, 70, 60, 50, 40],
-        "targets": ["Queen", "Minister", "Commander", "Detective", "Police", "Spy", "Chor"]
-    },
-    10: {
-        "name": "10-Player (Epic)",
-        "roles": ["👑 King", "👸 Queen", "🧙 Minister", "⚔️ Commander", "👮 Police Chief", "🕵️ Detective", "🥷 Spy", "🛡 Guard", "👮 Police", "🕵️ Chor"],
-        "points": [100, 90, 80, 70, 60, 50, 40, 30, 20],
-        "targets": ["Queen", "Minister", "Commander", "Police Chief", "Detective", "Spy", "Guard", "Police", "Chor"]
-    }
-}
+# ===== DYNAMIC ROLE SYSTEM =====
+# Roles in order (Chor is always last)
+ALL_ROLES = [
+    "👑 King",
+    "👸 Queen",
+    "🧙 Minister",
+    "⚔️ Commander",
+    "🕵️ Detective",
+    "🥷 Spy",
+    "🛡 Guard",
+    "👮 Police Chief",
+    "👮 Police",
+    "🕵️ Chor"
+]
 
-# ===== SHOP ITEMS =====
-SHOP = {
-    "shield": {"name": "🛡️ Shield", "cost": 20, "effect": "No swap on wrong guess"},
-    "hint": {"name": "🎯 Hint", "cost": 40, "effect": "Get a clue about target"},
-    "freeze": {"name": "⏱️ Time Freeze", "cost": 25, "effect": "Pause timer for 10s"},
-    "double": {"name": "🔍 Double Chance", "cost": 30, "effect": "2 guesses in one turn"},
-}
+# Points for each level (decreasing)
+ALL_POINTS = [100, 90, 80, 70, 60, 50, 40, 30, 20]
+
+def get_roles_for_players(player_count):
+    """
+    Get roles and points based on number of players.
+    Minimum: 4, Maximum: 10
+    """
+    if player_count < 4:
+        return None, None
+    
+    if player_count > 10:
+        player_count = 10
+    
+    # Get first (player_count - 1) roles, then add Chor at the end
+    roles = ALL_ROLES[:player_count - 1] + ["🕵️ Chor"]
+    points = ALL_POINTS[:player_count - 1]
+    
+    return roles, points
 
 # ===== EMOJIS =====
 EMOJIS = {
@@ -52,8 +52,6 @@ EMOJIS = {
     "wrong": "❌",
     "swap": "🔄",
     "timer": "⏱️",
-    "coins": "💰",
-    "points": "⭐",
     "trophy": "🏆",
     "warning": "⚠️"
 }
