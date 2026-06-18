@@ -70,6 +70,10 @@ def delete_message(chat_id, message_id):
     except:
         pass
 
+def strip_emoji(text):
+    """Remove emojis and special characters from role name"""
+    return re.sub(r'[^\w\s]', '', text).strip()
+
 # ============================================================
 # SAVE/LOAD GAME DATA
 # ============================================================
@@ -109,7 +113,6 @@ def load_game_data():
 # ============================================================
 
 def get_join_menu(game, chat_id):
-    """Simple menu with ONLY Join button"""
     markup = InlineKeyboardMarkup(row_width=1)
     buttons = []
     
@@ -164,7 +167,7 @@ class Game:
         self.start_message_id = None
         self.found_players = []
         self.timer_active = False
-        self.menu_message_id = None  # Store menu message ID for editing
+        self.menu_message_id = None
         
     def set_mode_from_players(self):
         player_count = len(self.players)
@@ -267,7 +270,7 @@ class Game:
             return False, "❌ No target found!"
         
         chosen_role_full = self.card_map.get(chosen_player_id, "Unknown")
-        chosen_role_plain = re.sub(r'[^\w\s]', '', chosen_role_full).strip()
+        chosen_role_plain = strip_emoji(chosen_role_full)
         
         chosen_player = self.get_player(chosen_player_id)
         if not chosen_player:
@@ -284,7 +287,6 @@ class Game:
             
             if self.current_level >= len(self.targets):
                 self.status = "ended"
-                
                 return True, {
                     "result": "correct",
                     "message": f"🎉🏆 {seeker['name']} found {target_role}! GAME OVER! Winner: {seeker['name']} with {seeker['points']} points!",
@@ -293,7 +295,6 @@ class Game:
                 }
             else:
                 next_seeker = self.get_current_seeker()
-                
                 return True, {
                     "result": "correct",
                     "message": f"✅ {seeker['name']} found {target_role}! +{points} points! 🎉",
@@ -372,7 +373,7 @@ class Game:
         return sorted(self.players, key=lambda x: x["points"], reverse=True)
 
 # ============================================================
-# UPDATE MENU FUNCTION - Edits the same message
+# UPDATE MENU FUNCTION
 # ============================================================
 
 def update_game_menu(chat_id, game):
@@ -400,6 +401,16 @@ def update_game_menu(chat_id, game):
         )
     except Exception as e:
         print(f"Error updating menu: {e}")
+
+def delete_game_menu(chat_id, game):
+    """Delete the game menu message after game starts"""
+    if game.menu_message_id is not None:
+        try:
+            bot.delete_message(chat_id, game.menu_message_id)
+            game.menu_message_id = None
+            save_game_data()
+        except Exception as e:
+            print(f"Error deleting menu: {e}")
 
 # ============================================================
 # CALLBACK HANDLERS
@@ -522,7 +533,6 @@ def handle_join(call):
     
     if success:
         save_game_data()
-        # Update the SAME message instead of sending new one
         update_game_menu(chat_id, game)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('start_'))
@@ -548,6 +558,10 @@ def handle_start(call):
         bot.answer_callback_query(call.id, f"❌ Need {4 - len(game.players)} more players!", show_alert=True)
         return
     
+    # DELETE THE MENU MESSAGE (Join button removed)
+    delete_game_menu(chat_id, game)
+    
+    # Delete the callback message too
     try:
         bot.delete_message(chat_id, call.message.message_id)
     except:
@@ -798,10 +812,8 @@ def game_command(message):
         game.add_player(user_id, user_name)
         save_game_data()
         
-        # Build player list
         player_list = "\n".join([f"• {p['name']}" for p in game.players])
         
-        # Send initial menu and store message ID
         sent_msg = bot.send_message(
             chat_id,
             f"⚔️ **Game Menu**\n\n"
@@ -813,7 +825,6 @@ def game_command(message):
             parse_mode='Markdown'
         )
         
-        # Store message ID for later updates
         game.menu_message_id = sent_msg.message_id
         save_game_data()
         
@@ -823,10 +834,8 @@ def game_command(message):
             bot.send_message(chat_id, "❌ Game already in progress!")
             return
         
-        # Build player list
         player_list = "\n".join([f"• {p['name']}" for p in game.players])
         
-        # Send menu and store message ID
         sent_msg = bot.send_message(
             chat_id,
             f"⚔️ **Game Menu**\n\n"
@@ -871,6 +880,9 @@ def startgame_command(message):
     if len(game.players) < 4:
         bot.send_message(chat_id, f"❌ Need {4 - len(game.players)} more players!")
         return
+    
+    # DELETE THE MENU MESSAGE (Join button removed)
+    delete_game_menu(chat_id, game)
     
     success, result = game.start_game()
     
