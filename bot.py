@@ -19,7 +19,7 @@ app = Flask(__name__)
 def set_bot_commands():
     commands = [
         BotCommand("game", "⚔️ Create or join a game"),
-        BotCommand("startgame", "🚀 Start game (Admin/creator)"),
+        BotCommand("startgame", "🚀 Start game"),
         BotCommand("score", "🏆 View points leaderboard"),
         BotCommand("mycard", "🃏 View your role"),
         BotCommand("status", "📊 View game status"),
@@ -71,7 +71,7 @@ def delete_message(chat_id, message_id):
         pass
 
 # ============================================================
-# SAVE/LOAD GAME DATA (Local JSON)
+# SAVE/LOAD GAME DATA
 # ============================================================
 
 def save_game_data():
@@ -89,7 +89,8 @@ def save_game_data():
                 "card_map": game.card_map,
                 "swap_history": game.swap_history,
                 "creator_id": game.creator_id,
-                "found_players": game.found_players
+                "found_players": game.found_players,
+                "menu_message_id": game.menu_message_id
             }
         with open("game_data.json", "w") as f:
             json.dump(data, f)
@@ -107,31 +108,13 @@ def load_game_data():
 # INLINE KEYBOARD FUNCTIONS
 # ============================================================
 
-def get_main_menu(game, chat_id, is_admin=False):
-    """Main menu with Join, Start buttons"""
-    markup = InlineKeyboardMarkup(row_width=2)
+def get_join_menu(game, chat_id):
+    """Simple menu with ONLY Join button"""
+    markup = InlineKeyboardMarkup(row_width=1)
     buttons = []
     
     if game.status == "waiting":
-        # Join button
         buttons.append(InlineKeyboardButton("🎮 Join Game", callback_data=f"join_{chat_id}"))
-        
-        # Start button (only for admin/creator)
-        if is_admin and len(game.players) >= 4:
-            buttons.append(InlineKeyboardButton("🚀 Start Game", callback_data=f"start_{chat_id}"))
-        elif is_admin and len(game.players) < 4:
-            buttons.append(InlineKeyboardButton(f"⏳ Need {4 - len(game.players)} more", callback_data="noop"))
-    
-    # Info buttons
-    buttons.append(InlineKeyboardButton("🏆 Score", callback_data=f"score_{chat_id}"))
-    buttons.append(InlineKeyboardButton("🃏 My Card", callback_data=f"mycard_{chat_id}"))
-    buttons.append(InlineKeyboardButton("📊 Status", callback_data=f"status_{chat_id}"))
-    buttons.append(InlineKeyboardButton("👥 Players", callback_data=f"players_{chat_id}"))
-    buttons.append(InlineKeyboardButton("🔄 History", callback_data=f"history_{chat_id}"))
-    
-    # Admin buttons
-    if is_admin and game.status == "playing":
-        buttons.append(InlineKeyboardButton("💀 Kill Game", callback_data=f"kill_{chat_id}"))
     
     markup.add(*buttons)
     return markup
@@ -168,7 +151,7 @@ class Game:
     def __init__(self, creator_id=None):
         self.creator_id = creator_id
         self.players = []
-        self.mode = 0  # Will be set when game starts
+        self.mode = 0
         self.roles = []
         self.points = []
         self.targets = []
@@ -181,9 +164,9 @@ class Game:
         self.start_message_id = None
         self.found_players = []
         self.timer_active = False
+        self.menu_message_id = None  # Store menu message ID for editing
         
     def set_mode_from_players(self):
-        """Set roles and points based on number of players"""
         player_count = len(self.players)
         roles, points = get_roles_for_players(player_count)
         
@@ -192,7 +175,7 @@ class Game:
         
         self.roles = roles
         self.points = points
-        self.targets = roles[1:]  # All roles except the first one (King)
+        self.targets = roles[1:]
         self.mode = player_count
         return True, f"✅ Mode set for {player_count} players!"
     
@@ -218,7 +201,6 @@ class Game:
         if len(self.players) < 4:
             return False, f"❌ Need at least 4 players! ({len(self.players)} currently)"
         
-        # Set roles based on player count
         success, msg = self.set_mode_from_players()
         if not success:
             return False, msg
@@ -322,7 +304,6 @@ class Game:
                     "found_players": self.found_players.copy()
                 }
         else:
-            # WRONG! Swap cards
             old_seeker_role = self.card_map[seeker_id]
             old_chosen_role = self.card_map[chosen_player_id]
             
@@ -336,7 +317,6 @@ class Game:
                 "swapped": f"{old_seeker_role} ↔ {old_chosen_role}"
             })
             
-            # Send DM to seeker with new role
             try:
                 bot.send_message(
                     seeker["id"],
@@ -348,7 +328,6 @@ class Game:
             except:
                 pass
             
-            # Send DM to chosen player with new role
             try:
                 bot.send_message(
                     chosen_player["id"],
@@ -391,6 +370,36 @@ class Game:
     
     def get_leaderboard(self):
         return sorted(self.players, key=lambda x: x["points"], reverse=True)
+
+# ============================================================
+# UPDATE MENU FUNCTION - Edits the same message
+# ============================================================
+
+def update_game_menu(chat_id, game):
+    """Update the game menu message with current player list"""
+    if game.menu_message_id is None:
+        return
+    
+    player_list = "\n".join([f"• {p['name']}" for p in game.players])
+    
+    text = (
+        f"⚔️ **Game Menu**\n\n"
+        f"👥 Players ({len(game.players)}):\n{player_list}\n\n"
+        f"📌 Minimum: 4 players to start\n"
+        f"📌 Maximum: 10 players\n\n"
+        f"📌 Click the button below to join!"
+    )
+    
+    try:
+        bot.edit_message_text(
+            text,
+            chat_id,
+            game.menu_message_id,
+            reply_markup=get_join_menu(game, chat_id),
+            parse_mode='Markdown'
+        )
+    except Exception as e:
+        print(f"Error updating menu: {e}")
 
 # ============================================================
 # CALLBACK HANDLERS
@@ -488,10 +497,6 @@ def handle_guess(call):
         print(f"Callback error: {e}")
         bot.answer_callback_query(call.id, "❌ Error", show_alert=True)
 
-# ============================================================
-# MAIN MENU CALLBACKS
-# ============================================================
-
 @bot.callback_query_handler(func=lambda call: call.data.startswith('join_'))
 def handle_join(call):
     chat_id = int(call.data.split('_')[1])
@@ -517,21 +522,8 @@ def handle_join(call):
     
     if success:
         save_game_data()
-        try:
-            bot.delete_message(chat_id, call.message.message_id)
-        except:
-            pass
-        
-        is_admin = is_admin_or_creator(call.message, game)
-        bot.send_message(
-            chat_id,
-            f"👥 **Players ({len(game.players)})**\n\n" +
-            "\n".join([f"• {p['name']}" for p in game.players]) +
-            f"\n\n👑 Creator: {game.creator_id}\n"
-            f"📌 Click below to manage the game!",
-            reply_markup=get_main_menu(game, chat_id, is_admin),
-            parse_mode='Markdown'
-        )
+        # Update the SAME message instead of sending new one
+        update_game_menu(chat_id, game)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('start_'))
 def handle_start(call):
@@ -598,29 +590,6 @@ def handle_start(call):
     else:
         bot.send_message(chat_id, f"❌ {result}")
         bot.answer_callback_query(call.id, "❌ Failed", show_alert=True)
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith('menu_'))
-def handle_menu(call):
-    chat_id = int(call.data.split('_')[1])
-    try:
-        bot.delete_message(call.message.chat.id, call.message.message_id)
-    except:
-        pass
-    
-    if chat_id in active_games:
-        game = active_games[chat_id]
-        is_admin = is_admin_or_creator(call.message, game)
-        bot.send_message(
-            chat_id,
-            f"⚔️ **Game Menu**\n\n"
-            f"👥 Players: {len(game.players)}\n"
-            f"📌 Status: {game.status}",
-            reply_markup=get_main_menu(game, chat_id, is_admin),
-            parse_mode='Markdown'
-        )
-    else:
-        bot.send_message(chat_id, "❌ No active game! Use /game to create one.")
-    bot.answer_callback_query(call.id, "🏠 Menu")
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('score_'))
 def handle_score(call):
@@ -826,38 +795,118 @@ def game_command(message):
     if chat_id not in active_games:
         game = Game(creator_id=user_id)
         active_games[chat_id] = game
-        # Auto-add the creator
         game.add_player(user_id, user_name)
         save_game_data()
         
-        is_admin = is_admin_or_creator(message, game)
-        bot.send_message(
+        # Build player list
+        player_list = "\n".join([f"• {p['name']}" for p in game.players])
+        
+        # Send initial menu and store message ID
+        sent_msg = bot.send_message(
             chat_id,
-            f"⚔️ **Game created!**\n\n"
-            f"👑 Creator: {message.from_user.first_name}\n"
-            f"👥 Players: {len(game.players)}\n"
+            f"⚔️ **Game Menu**\n\n"
+            f"👥 Players ({len(game.players)}):\n{player_list}\n\n"
             f"📌 Minimum: 4 players to start\n"
             f"📌 Maximum: 10 players\n\n"
-            f"📌 Click below to manage the game!",
-            reply_markup=get_main_menu(game, chat_id, is_admin),
+            f"📌 Click the button below to join!",
+            reply_markup=get_join_menu(game, chat_id),
             parse_mode='Markdown'
         )
+        
+        # Store message ID for later updates
+        game.menu_message_id = sent_msg.message_id
+        save_game_data()
+        
     else:
         game = active_games[chat_id]
         if game.status == "playing":
             bot.send_message(chat_id, "❌ Game already in progress!")
             return
         
-        is_admin = is_admin_or_creator(message, game)
-        bot.send_message(
+        # Build player list
+        player_list = "\n".join([f"• {p['name']}" for p in game.players])
+        
+        # Send menu and store message ID
+        sent_msg = bot.send_message(
             chat_id,
             f"⚔️ **Game Menu**\n\n"
-            f"👥 Players: {len(game.players)}\n"
-            f"📌 Minimum: 4 players to start\n\n"
-            f"📌 Click below to manage the game!",
-            reply_markup=get_main_menu(game, chat_id, is_admin),
+            f"👥 Players ({len(game.players)}):\n{player_list}\n\n"
+            f"📌 Minimum: 4 players to start\n"
+            f"📌 Maximum: 10 players\n\n"
+            f"📌 Click the button below to join!",
+            reply_markup=get_join_menu(game, chat_id),
             parse_mode='Markdown'
         )
+        
+        game.menu_message_id = sent_msg.message_id
+        save_game_data()
+
+@bot.message_handler(commands=['startgame'])
+def startgame_command(message):
+    chat_id = message.chat.id
+    
+    try:
+        delete_message(chat_id, message.message_id)
+    except:
+        pass
+    
+    if chat_id > 0:
+        bot.send_message(chat_id, "❌ This command only works in groups!")
+        return
+    
+    if chat_id not in active_games:
+        bot.send_message(chat_id, "❌ No game found! Use /game first!")
+        return
+    
+    game = active_games[chat_id]
+    
+    if game.status != "waiting":
+        bot.send_message(chat_id, "❌ Game already started or ended!")
+        return
+    
+    if not is_admin_or_creator(message, game):
+        bot.send_message(chat_id, "❌ Only the game creator or group admin can start the game!")
+        return
+    
+    if len(game.players) < 4:
+        bot.send_message(chat_id, f"❌ Need {4 - len(game.players)} more players!")
+        return
+    
+    success, result = game.start_game()
+    
+    if success:
+        for player in game.players:
+            role = game.get_player_role(player["id"])
+            try:
+                bot.send_message(
+                    player["id"], 
+                    f"🃏 Your role: **{role}**\n🤫 Don't tell anyone!",
+                    parse_mode='Markdown'
+                )
+            except:
+                pass
+        
+        buttons = get_player_buttons(game, result['seeker']["id"], chat_id)
+        if buttons:
+            active_count = len(game.get_active_players())
+            bot.send_message(
+                chat_id, 
+                f"⚔️ **GAME STARTED!**\n\n"
+                f"👑 **Seeker:** {result['seeker']['name']}\n"
+                f"🎯 **Target:** {result['target']}\n"
+                f"⭐ **Points:** {result['points']}\n"
+                f"👥 **Active Players:** {active_count}\n\n"
+                f"💡 Click a button to guess!",
+                reply_markup=buttons,
+                parse_mode='Markdown'
+            )
+            save_game_data()
+        else:
+            bot.send_message(chat_id, "❌ No active players to guess!")
+            game.status = "ended"
+            save_game_data()
+    else:
+        bot.send_message(chat_id, f"❌ {result}")
 
 @bot.message_handler(commands=['score'])
 def show_leaderboard(message):
