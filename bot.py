@@ -74,6 +74,12 @@ def strip_emoji(text):
     """Remove emojis and special characters from role name"""
     return re.sub(r'[^\w\s]', '', text).strip()
 
+def get_role_name(role_with_emoji):
+    """Extract plain role name from role with emoji"""
+    # Example: "👑 King" -> "King"
+    # Example: "👸 Queen" -> "Queen"
+    return strip_emoji(role_with_emoji)
+
 # ============================================================
 # SAVE/LOAD GAME DATA
 # ============================================================
@@ -157,10 +163,10 @@ class Game:
         self.mode = 0
         self.roles = []
         self.points = []
-        self.targets = []
+        self.targets = []  # Plain role names without emojis
         self.current_level = 0
         self.status = "waiting"
-        self.card_map = {}
+        self.card_map = {}  # player_id -> role with emoji
         self.swap_history = []
         self.start_time = None
         self.total_rounds = 0
@@ -178,7 +184,8 @@ class Game:
         
         self.roles = roles
         self.points = points
-        self.targets = roles[1:]
+        # targets = roles without the first one (King)
+        self.targets = [get_role_name(r) for r in roles[1:]]
         self.mode = player_count
         return True, f"✅ Mode set for {player_count} players!"
     
@@ -238,7 +245,7 @@ class Game:
     def get_current_seeker(self):
         if self.current_level >= len(self.roles) - 1:
             return None
-        role = self.roles[self.current_level]
+        role = self.roles[self.current_level]  # Role with emoji
         for player in self.players:
             if self.card_map.get(player["id"]) == role:
                 return player
@@ -246,7 +253,7 @@ class Game:
     
     def get_target_role(self):
         if self.current_level < len(self.targets):
-            return self.targets[self.current_level]
+            return self.targets[self.current_level]  # Plain role name without emoji
         return None
     
     def get_points(self):
@@ -269,13 +276,20 @@ class Game:
         if not target_role:
             return False, "❌ No target found!"
         
+        # Get the chosen player's full role (with emoji)
         chosen_role_full = self.card_map.get(chosen_player_id, "Unknown")
-        chosen_role_plain = strip_emoji(chosen_role_full)
+        
+        # Extract plain role name (remove emoji)
+        chosen_role_plain = get_role_name(chosen_role_full)
         
         chosen_player = self.get_player(chosen_player_id)
         if not chosen_player:
             return False, "❌ Player not found!"
         
+        # DEBUG: Print comparison
+        print(f"Target: '{target_role}' | Chosen: '{chosen_role_plain}' | Full: '{chosen_role_full}'")
+        
+        # Compare PLAIN text (no emojis)
         if chosen_role_plain == target_role:
             points = self.get_points()
             seeker["points"] += points
@@ -305,6 +319,7 @@ class Game:
                     "found_players": self.found_players.copy()
                 }
         else:
+            # WRONG! Swap cards
             old_seeker_role = self.card_map[seeker_id]
             old_chosen_role = self.card_map[chosen_player_id]
             
@@ -377,7 +392,6 @@ class Game:
 # ============================================================
 
 def update_game_menu(chat_id, game):
-    """Update the game menu message with current player list"""
     if game.menu_message_id is None:
         return
     
@@ -403,7 +417,6 @@ def update_game_menu(chat_id, game):
         print(f"Error updating menu: {e}")
 
 def delete_game_menu(chat_id, game):
-    """Delete the game menu message after game starts"""
     if game.menu_message_id is not None:
         try:
             bot.delete_message(chat_id, game.menu_message_id)
@@ -558,10 +571,8 @@ def handle_start(call):
         bot.answer_callback_query(call.id, f"❌ Need {4 - len(game.players)} more players!", show_alert=True)
         return
     
-    # DELETE THE MENU MESSAGE (Join button removed)
     delete_game_menu(chat_id, game)
     
-    # Delete the callback message too
     try:
         bot.delete_message(chat_id, call.message.message_id)
     except:
@@ -881,7 +892,6 @@ def startgame_command(message):
         bot.send_message(chat_id, f"❌ Need {4 - len(game.players)} more players!")
         return
     
-    # DELETE THE MENU MESSAGE (Join button removed)
     delete_game_menu(chat_id, game)
     
     success, result = game.start_game()
