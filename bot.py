@@ -22,7 +22,7 @@ def set_bot_commands():
         BotCommand("collect", "🃏 Collection Mode - Collect 4 identical cards"),
         BotCommand("startgame", "🚀 Start game"),
         BotCommand("score", "🏆 View points leaderboard"),
-        BotCommand("mycard", "🃏 View your role"),
+        BotCommand("mycard", "🃏 View your role/cards"),
         BotCommand("status", "📊 View game status"),
         BotCommand("players", "👥 View all players"),
         BotCommand("history", "🔄 View swap history"),
@@ -73,15 +73,12 @@ def delete_message(chat_id, message_id):
         pass
 
 def strip_emoji(text):
-    """Remove emojis and special characters from role name"""
     return re.sub(r'[^\w\s]', '', text).strip()
 
 def get_role_name(role_with_emoji):
-    """Extract plain role name from role with emoji"""
     return strip_emoji(role_with_emoji)
 
 def get_card_emoji(card_type):
-    """Get emoji for card type"""
     emojis = {
         "King": "👑", "Queen": "👸", "Minister": "🧙", "Commander": "⚔️",
         "Detective": "🕵️", "Spy": "🥷", "Guard": "🛡️", "Police": "👮", "Chor": "🕵️",
@@ -517,8 +514,8 @@ def get_player_buttons(game, seeker_id, chat_id):
     markup.add(*buttons)
     return markup
 
-def get_collection_card_buttons(game, player_id, chat_id):
-    """Get inline buttons for collection mode card passing"""
+def get_collection_card_buttons(game, player_id):
+    """Get card buttons for collection mode - ONLY current player sees these"""
     cards = game.get_player_cards(player_id)
     if not cards:
         return None
@@ -527,7 +524,7 @@ def get_collection_card_buttons(game, player_id, chat_id):
     buttons = []
     for c in cards:
         emoji = get_card_emoji(c)
-        buttons.append(InlineKeyboardButton(f"{emoji} {c}", callback_data=f"pass_{c}_{player_id}_{chat_id}"))
+        buttons.append(InlineKeyboardButton(f"{emoji} {c}", callback_data=f"pass_{c}_{player_id}"))
     markup.add(*buttons)
     return markup
 
@@ -569,8 +566,12 @@ def delete_game_menu(chat_id, game):
         except Exception as e:
             print(f"Error deleting menu: {e}")
 
+# ============================================================
+# COLLECTION MODE - GROUP ONLY (Like UNO/Rummy)
+# ============================================================
+
 def show_collection_turn(chat_id, game):
-    """Show turn for collection mode with buttons"""
+    """Show turn - ONLY current player sees their cards"""
     player = game.get_current_player()
     if not player:
         return
@@ -579,21 +580,30 @@ def show_collection_turn(chat_id, game):
     if not next_p:
         return
     
-    markup = get_collection_card_buttons(game, player["id"], chat_id)
+    # Public announcement - everyone sees (NO CARDS)
+    bot.send_message(
+        chat_id,
+        f"🔄 @{player['name']}'s turn! Pass a card to @{next_p['name']}! 🤫",
+        parse_mode='Markdown'
+    )
     
+    # Show card buttons ONLY to the current player
+    cards = game.get_player_cards(player["id"])
+    if not cards:
+        bot.send_message(chat_id, f"❌ {player['name']} has no cards left!")
+        return
+    
+    markup = get_collection_card_buttons(game, player["id"])
     if markup:
+        # Send card selection message - only the player sees this
         bot.send_message(
             chat_id,
-            f"🃏 **@{player['name']}'s turn!** Pass a card to @{next_p['name']}!",
+            f"@{player['name']}, choose which card to pass 👇",
             reply_markup=markup,
             parse_mode='Markdown'
         )
     else:
-        bot.send_message(
-            chat_id,
-            f"❌ {player['name']} has no cards left!",
-            parse_mode='Markdown'
-        )
+        bot.send_message(chat_id, f"❌ {player['name']} has no cards left!")
 
 def show_collection_winners(chat_id, game):
     msg = "🏆 **GAME OVER!** 🏆\n\n"
@@ -734,7 +744,6 @@ def handle_join(call):
         bot.answer_callback_query(call.id, msg, show_alert=True)
         if success:
             save_game_data()
-            # Show player list for collection mode
             player_list = "\n".join([f"• {p['name']}" for p in game.players])
             bot.send_message(
                 chat_id,
@@ -825,7 +834,6 @@ def handle_start(call):
         start = result["starting_player"]
         next_p = game.get_next_player()
         
-        # Announce start
         bot.send_message(
             chat_id,
             f"🃏 **COLLECTION MODE STARTED!**\n\n"
@@ -835,7 +843,6 @@ def handle_start(call):
             parse_mode='Markdown'
         )
         
-        # Show turn buttons
         show_collection_turn(chat_id, game)
         save_game_data()
         bot.answer_callback_query(call.id, "✅ Game started!")
@@ -847,9 +854,13 @@ def handle_start(call):
 @bot.callback_query_handler(func=lambda call: call.data.startswith('pass_'))
 def handle_collection_pass(call):
     try:
-        _, card, player_id, chat_id = call.data.split('_')
+        _, card, player_id = call.data.split('_')
         player_id = int(player_id)
-        chat_id = int(chat_id)
+        chat_id = call.message.chat.id
+        
+        if call.from_user.id != player_id:
+            bot.answer_callback_query(call.id, "❌ It's not your turn!", show_alert=True)
+            return
         
         if chat_id not in active_games:
             bot.answer_callback_query(call.id, "❌ No active game!", show_alert=True)
@@ -870,14 +881,16 @@ def handle_collection_pass(call):
             bot.answer_callback_query(call.id, "❌ It's not your turn!", show_alert=True)
             return
         
-        if call.from_user.id != player_id:
-            bot.answer_callback_query(call.id, "❌ It's not your turn!", show_alert=True)
-            return
-        
         success, result = game.pass_card(player_id, card)
         if not success:
             bot.answer_callback_query(call.id, f"❌ {result}", show_alert=True)
             return
+        
+        # Delete the pass message (so others don't see the buttons)
+        try:
+            bot.delete_message(chat_id, call.message.message_id)
+        except:
+            pass
         
         # Public announcement (NO CARD DETAILS)
         sender = result["sender"]
@@ -1162,6 +1175,7 @@ def start_command(message):
 • Collect 4 identical cards to win!
 • Pass cards to other players
 • First to collect 4 cards wins!
+• Cards are ONLY visible to the player!
 
 *Enjoy!* 🎉
     """
@@ -1326,7 +1340,6 @@ def join_command(message):
     
     if success:
         save_game_data()
-        # Update player list
         player_list = "\n".join([f"• {p['name']}" for p in game.players])
         mode_name = "⚔️ Classic Mode" if isinstance(game, ClassicGame) else "🃏 Collection Mode"
         bot.send_message(
@@ -1371,7 +1384,6 @@ def startgame_command(message):
         return
     
     if isinstance(game, ClassicGame):
-        # Delete menu for classic
         delete_game_menu(chat_id, game)
         
         success, result = game.start_game()
