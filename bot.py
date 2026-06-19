@@ -514,20 +514,6 @@ def get_player_buttons(game, seeker_id, chat_id):
     markup.add(*buttons)
     return markup
 
-def get_collection_card_buttons(game, player_id):
-    """Get card buttons for collection mode - ONLY current player sees these"""
-    cards = game.get_player_cards(player_id)
-    if not cards:
-        return None
-    
-    markup = InlineKeyboardMarkup(row_width=2)
-    buttons = []
-    for c in cards:
-        emoji = get_card_emoji(c)
-        buttons.append(InlineKeyboardButton(f"{emoji} {c}", callback_data=f"pass_{c}_{player_id}"))
-    markup.add(*buttons)
-    return markup
-
 # ============================================================
 # UPDATE MENU FUNCTIONS
 # ============================================================
@@ -567,11 +553,11 @@ def delete_game_menu(chat_id, game):
             print(f"Error deleting menu: {e}")
 
 # ============================================================
-# COLLECTION MODE - GROUP ONLY (Like UNO/Rummy)
+# COLLECTION MODE - FIXED (Cards hidden from others)
 # ============================================================
 
 def show_collection_turn(chat_id, game):
-    """Show turn - ONLY current player sees their cards"""
+    """Show turn - cards are HIDDEN from others using popup"""
     player = game.get_current_player()
     if not player:
         return
@@ -587,23 +573,144 @@ def show_collection_turn(chat_id, game):
         parse_mode='Markdown'
     )
     
-    # Show card buttons ONLY to the current player
-    cards = game.get_player_cards(player["id"])
-    if not cards:
-        bot.send_message(chat_id, f"❌ {player['name']} has no cards left!")
+    # Send a generic button that opens card selection
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("🎯 Choose Card to Pass", callback_data=f"choose_{player['id']}"))
+    
+    bot.send_message(
+        chat_id,
+        f"@{player['name']}, click below to choose your card!",
+        reply_markup=markup,
+        parse_mode='Markdown'
+    )
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('choose_'))
+def handle_choose_card(call):
+    player_id = int(call.data.split('_')[1])
+    chat_id = call.message.chat.id
+    
+    if call.from_user.id != player_id:
+        bot.answer_callback_query(call.id, "❌ Not your turn!", show_alert=True)
         return
     
-    markup = get_collection_card_buttons(game, player["id"])
-    if markup:
-        # Send card selection message - only the player sees this
+    if chat_id not in active_games:
+        bot.answer_callback_query(call.id, "❌ No active game!", show_alert=True)
+        return
+    
+    game = active_games[chat_id]
+    
+    if not isinstance(game, CollectionGame):
+        bot.answer_callback_query(call.id, "❌ Not a Collection game!", show_alert=True)
+        return
+    
+    if game.status != "playing":
+        bot.answer_callback_query(call.id, "❌ Game is not active!", show_alert=True)
+        return
+    
+    current = game.get_current_player()
+    if not current or current["id"] != player_id:
+        bot.answer_callback_query(call.id, "❌ It's not your turn!", show_alert=True)
+        return
+    
+    cards = game.get_player_cards(player_id)
+    if not cards:
+        bot.answer_callback_query(call.id, "❌ You have no cards!", show_alert=True)
+        return
+    
+    # Create card selection buttons (only the player sees this message)
+    markup = InlineKeyboardMarkup(row_width=2)
+    for c in cards:
+        emoji = get_card_emoji(c)
+        markup.add(InlineKeyboardButton(f"{emoji} {c}", callback_data=f"pass_{c}_{player_id}"))
+    
+    bot.send_message(
+        chat_id,
+        f"🃏 Choose which card to pass:",
+        reply_markup=markup
+    )
+    
+    bot.answer_callback_query(call.id, "✅ Choose your card!")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('pass_'))
+def handle_collection_pass(call):
+    try:
+        _, card, player_id = call.data.split('_')
+        player_id = int(player_id)
+        chat_id = call.message.chat.id
+        
+        if call.from_user.id != player_id:
+            bot.answer_callback_query(call.id, "❌ It's not your turn!", show_alert=True)
+            return
+        
+        if chat_id not in active_games:
+            bot.answer_callback_query(call.id, "❌ No active game!", show_alert=True)
+            return
+        
+        game = active_games[chat_id]
+        
+        if not isinstance(game, CollectionGame):
+            bot.answer_callback_query(call.id, "❌ Not a Collection game!", show_alert=True)
+            return
+        
+        if game.status != "playing":
+            bot.answer_callback_query(call.id, "❌ Game is not active!", show_alert=True)
+            return
+        
+        current = game.get_current_player()
+        if not current or current["id"] != player_id:
+            bot.answer_callback_query(call.id, "❌ It's not your turn!", show_alert=True)
+            return
+        
+        success, result = game.pass_card(player_id, card)
+        if not success:
+            bot.answer_callback_query(call.id, f"❌ {result}", show_alert=True)
+            return
+        
+        # Delete the pass message (so others don't see the buttons)
+        try:
+            bot.delete_message(chat_id, call.message.message_id)
+        except:
+            pass
+        
+        # Public announcement (NO CARD DETAILS)
+        sender = result["sender"]
+        receiver = result["receiver"]
         bot.send_message(
             chat_id,
-            f"@{player['name']}, choose which card to pass 👇",
-            reply_markup=markup,
+            f"🔄 @{sender['name']} passed a card to @{receiver['name']}! 🤫",
             parse_mode='Markdown'
         )
-    else:
-        bot.send_message(chat_id, f"❌ {player['name']} has no cards left!")
+        
+        # Check if receiver won
+        has_won, card_type = game.check_winner(receiver["id"])
+        if has_won:
+            game.winners.append(receiver)
+            max_winners = game.get_max_winners()
+            
+            emoji = get_card_emoji(card_type)
+            bot.send_message(
+                chat_id,
+                f"🎉🎉🎉 **@{receiver['name']} WINS!** 🎉🎉🎉\n\n"
+                f"{receiver['name']} collected 4 {emoji} {card_type} cards!\n"
+                f"🏆 Rank: #{len(game.winners)}",
+                parse_mode='Markdown'
+            )
+            
+            if len(game.winners) >= max_winners:
+                game.status = "ended"
+                show_collection_winners(chat_id, game)
+                save_game_data()
+                bot.answer_callback_query(call.id, "🏆 Game Over!")
+                return
+        
+        # Show next turn
+        show_collection_turn(chat_id, game)
+        save_game_data()
+        bot.answer_callback_query(call.id, "✅ Card passed!")
+        
+    except Exception as e:
+        print(f"Error: {e}")
+        bot.answer_callback_query(call.id, "❌ Error!", show_alert=True)
 
 def show_collection_winners(chat_id, game):
     msg = "🏆 **GAME OVER!** 🏆\n\n"
@@ -848,89 +955,8 @@ def handle_start(call):
         bot.answer_callback_query(call.id, "✅ Game started!")
 
 # ============================================================
-# CALLBACK HANDLERS - Collection Mode
+# CALLBACK HANDLERS - Info Commands
 # ============================================================
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith('pass_'))
-def handle_collection_pass(call):
-    try:
-        _, card, player_id = call.data.split('_')
-        player_id = int(player_id)
-        chat_id = call.message.chat.id
-        
-        if call.from_user.id != player_id:
-            bot.answer_callback_query(call.id, "❌ It's not your turn!", show_alert=True)
-            return
-        
-        if chat_id not in active_games:
-            bot.answer_callback_query(call.id, "❌ No active game!", show_alert=True)
-            return
-        
-        game = active_games[chat_id]
-        
-        if not isinstance(game, CollectionGame):
-            bot.answer_callback_query(call.id, "❌ Not a Collection game!", show_alert=True)
-            return
-        
-        if game.status != "playing":
-            bot.answer_callback_query(call.id, "❌ Game is not active!", show_alert=True)
-            return
-        
-        current = game.get_current_player()
-        if not current or current["id"] != player_id:
-            bot.answer_callback_query(call.id, "❌ It's not your turn!", show_alert=True)
-            return
-        
-        success, result = game.pass_card(player_id, card)
-        if not success:
-            bot.answer_callback_query(call.id, f"❌ {result}", show_alert=True)
-            return
-        
-        # Delete the pass message (so others don't see the buttons)
-        try:
-            bot.delete_message(chat_id, call.message.message_id)
-        except:
-            pass
-        
-        # Public announcement (NO CARD DETAILS)
-        sender = result["sender"]
-        receiver = result["receiver"]
-        bot.send_message(
-            chat_id,
-            f"🔄 @{sender['name']} passed a card to @{receiver['name']}! 🤫",
-            parse_mode='Markdown'
-        )
-        
-        # Check if receiver won
-        has_won, card_type = game.check_winner(receiver["id"])
-        if has_won:
-            game.winners.append(receiver)
-            max_winners = game.get_max_winners()
-            
-            emoji = get_card_emoji(card_type)
-            bot.send_message(
-                chat_id,
-                f"🎉🎉🎉 **@{receiver['name']} WINS!** 🎉🎉🎉\n\n"
-                f"{receiver['name']} collected 4 {emoji} {card_type} cards!\n"
-                f"🏆 Rank: #{len(game.winners)}",
-                parse_mode='Markdown'
-            )
-            
-            if len(game.winners) >= max_winners:
-                game.status = "ended"
-                show_collection_winners(chat_id, game)
-                save_game_data()
-                bot.answer_callback_query(call.id, "🏆 Game Over!")
-                return
-        
-        # Show next turn
-        show_collection_turn(chat_id, game)
-        save_game_data()
-        bot.answer_callback_query(call.id, "✅ Card passed!")
-        
-    except Exception as e:
-        print(f"Error: {e}")
-        bot.answer_callback_query(call.id, "❌ Error!", show_alert=True)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('score_'))
 def handle_score(call):
