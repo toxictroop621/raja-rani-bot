@@ -30,7 +30,7 @@ ALL_ROLES = [
 ALL_POINTS = [100, 90, 80, 70, 60, 50, 40, 30, 20]
 
 # ===== COLLECTION MODE SETTINGS =====
-# Card types used in Collection Mode (same as roles without emojis)
+# Card types used in Collection Mode
 CARD_TYPES = [
     "King",
     "Queen", 
@@ -56,6 +56,21 @@ CARD_EMOJIS = {
     "Police Chief": "👮",
     "Police": "👮",
     "Chor": "🕵️"
+}
+
+# ===== STICKER IDs FOR CARDS (From Card_Warfare_cards pack) =====
+CARD_STICKERS = {
+    "King": "CAACAgUAAxkBAzxhpmo2Jmhc8BdNST7VrAHG12o-qtlEAAIOJgACNNSxVa5k_ArhDyhYPAQ",
+    "Queen": "CAACAgUAAxkBAzxhq2o2Jmr7nuIORKCnzSRMn7gYKvuZAALiIwACYlOwVbpYv1od03b_PAQ",
+    "Minister": "CAACAgUAAxkBAzxhrWo2Jmu_h8nJDmI6nrrxmIBYRcYbAAJVJAACx8KwVSAF-ha-zFZEPAQ",
+    "Commander": "CAACAgUAAxkBAzxhv2o2JmyA0QXh_RCBaNHZnrG0n4qdAAJ7HQACxRq5VYdVeBufm10yPAQ",
+    "Detective": "CAACAgUAAxkBAzxhsWo2Jm3a3jOZbYT5Zd9jSiCY9ePDAAL-IgACfxWxVRL7TiKJOL8IPAQ",
+    "Spy": "CAACAgUAAxkBAzxhs2o2Jm7WX4AIFaqPKtPtKjgIh_yXAAIsHQACa_O5VXxKjOV2V1-OPAQ",
+    "Guard": "CAACAgUAAxkBAzxhtWo2Jm-nZ4Rps1IKLf-xnXF_27mdAAKNIQAC98qxVRSgUQN1Y95SPAQ",
+    "PoliceChief": "CAACAgUAAxkBAzxht2o2JnDXBvd2_hOo0VimSvD7KVXfAAKqJAACaGuwVQIJUWhF90WXPAQ",
+    "Police": "CAACAgUAAxkBAzxhumo2JnHupi8hjpgTjwAB027cYejEJgACzBwAAjlAuFU02_b9637hrTwE",
+    "Chor": "CAACAgUAAxkBAzxhvGo2JnI7RIR7xTKL3qsWsHQn7UwxAAI7HAACU4uwVR5M0QL0ubMcPAQ",
+    "CardBack": "CAACAgUAAxkBAzxhvmo2JnMLGxsQO2HxH8lCRZPn-E11AAK6HAACrgexVfbbEX13mB0LPAQ"
 }
 
 # ===== COLLECTION MODE CARD TYPES BY PLAYER COUNT =====
@@ -94,17 +109,9 @@ def get_card_type_emoji(card_type):
     """Get emoji for a card type"""
     return CARD_EMOJIS.get(card_type, "🃏")
 
-# ===== EMOJIS =====
-EMOJIS = {
-    "correct": "✅",
-    "wrong": "❌",
-    "swap": "🔄",
-    "timer": "⏱️",
-    "trophy": "🏆",
-    "warning": "⚠️",
-    "card": "🃏",
-    "collection": "🃏"
-}
+def get_card_sticker(card_type):
+    """Get sticker ID for a card type"""
+    return CARD_STICKERS.get(card_type)
 
 # ===== WINNER SETTINGS =====
 def get_max_winners(player_count):
@@ -120,3 +127,15 @@ def get_max_winners(player_count):
         return 2
     else:
         return 3
+
+# ===== EMOJIS =====
+EMOJIS = {
+    "correct": "✅",
+    "wrong": "❌",
+    "swap": "🔄",
+    "timer": "⏱️",
+    "trophy": "🏆",
+    "warning": "⚠️",
+    "card": "🃏",
+    "collection": "🃏"
+}
